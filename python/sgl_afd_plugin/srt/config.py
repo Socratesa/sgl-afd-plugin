@@ -19,7 +19,8 @@ class AFDConfig:
         name: A[T, "help text"] = default
         name: A[T, Arg(help="...", choices=[...], aliases=["--x"])] = default
 
-    Arg knobs: help, choices, aliases, cli_name, nargs.
+    Arg knobs: help, choices, aliases, cli_name, nargs, type_parser, required,
+        action, action_kwargs, const, no_cli.
     Types: bool / int / float / str / Literal[...] / list | tuple | set[scalar] /
         dict (given as JSON).
     """
@@ -33,4 +34,8 @@ class AFDConfig:
     ]
 
 
-get_config = plugin_config(AFDConfig, prefix="afd")
+get_config = plugin_config(
+    AFDConfig, 
+    prefix="afd",
+    doc="Get sglang Attention-FFN Disaggregation (AFD) plugin config.",
+)

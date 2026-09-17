@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import types
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, Union, get_args, get_origin, get_type_hints
 
@@ -22,6 +23,17 @@ class Arg:
     aliases: list | None = None
     cli_name: str | None = None
     nargs: str | None = None
+    type_parser: Callable | None = None
+    required: bool | None = None
+    action: Any | None = None
+    action_kwargs: dict | None = None
+    const: Any | None = None
+    no_cli: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 
 def _unwrap(hint: Any) -> tuple[Any, Arg]:
@@ -29,33 +41,35 @@ def _unwrap(hint: Any) -> tuple[Any, Arg]:
     if get_origin(hint) is not Annotated:
         return hint, Arg()
     base, *meta = get_args(hint)
-    text = next((m for m in meta if isinstance(m, str)), "")
-    arg = next((m for m in meta if isinstance(m, Arg)), Arg())
-    return base, dataclasses.replace(arg, help=arg.help or text)
+    arg = meta[0] if meta else Arg()
+    return base, arg if isinstance(arg, Arg) else Arg(help=arg)
 
 
-def _classify(ann: Any) -> tuple[str, Any, Any, list]:
-    origin = get_origin(ann)
+def _scalar_type(tp: Any) -> type:
+    return tp if tp in (str, int, float) else str
+
+
+def _classify(tp: Any) -> tuple[str, Any, Any, list]:
+    origin = get_origin(tp)
     if origin in (Union, types.UnionType):
-        inner = [a for a in get_args(ann) if a is not type(None)]
-        ann = inner[0] if inner else str
-        origin = get_origin(ann)
+        inner = [a for a in get_args(tp) if a is not type(None)]
+        if len(inner) != 1:
+            return "scalar", str, None, []
+        tp = inner[0]
+        origin = get_origin(tp)
 
-    if ann is bool:
+    if tp is bool:
         return "bool", None, None, []
+    if tp in (int, float, str):
+        return "scalar", tp, None, []
 
     if origin is Literal:
-        values = list(get_args(ann))
-        return "scalar", (type(values[0]) if values else str), None, values
-
-    container = origin or ann
+        values = list(get_args(tp))
+        return "scalar", _scalar_type(type(values[0])), None, values
+    container = origin or tp
     if container in (list, tuple, set, frozenset):
-        elems = [a for a in get_args(ann) if a is not Ellipsis]
-        return "seq", (elems[0] if elems else str), container, []
-    if container is dict:
-        return "json", None, None, []
-    if container in (int, float, str):
-        return "scalar", container, None, []
+        elems = [a for a in get_args(tp) if a is not Ellipsis]
+        return "seq", (_scalar_type(elems[0]) if elems else str), container, []
     return "json", None, None, []
 
 
@@ -64,41 +78,52 @@ class _Field:
         self.field = f.name
         self.dest = f"{prefix}_{f.name}"
         self.env = f"{prefix.upper()}_{f.name.upper()}"
-        self.default, self.default_factory = f.default, f.default_factory
+        self._default, self._default_factory = f.default, f.default_factory
 
-        base, arg = _unwrap(hint)
+        tp, arg = _unwrap(hint)
         self.cli = arg.cli_name or f"--{prefix}-{f.name.replace('_', '-')}"
         self.aliases = list(arg.aliases or ())
-        self.nargs = arg.nargs
         self.help = arg.help or f"{prefix} {f.name}"
+        self.nargs = arg.nargs
+        self.no_cli = arg.no_cli
+        self.type_parser = arg.type_parser
+        self.required = arg.required is True or (arg.required is None and self.default is dataclasses.MISSING)
+        self.action = arg.action
+        self.action_kwargs = arg.action_kwargs or {}
+        self.const = arg.const
 
-        self.kind, self.type_, self.container, literal = _classify(base)
+        self.kind, self.type_, self.container, literal = _classify(tp)
         self.choices = arg.choices or literal
 
     @property
-    def required(self) -> bool:
-        return self.default is self.default_factory is dataclasses.MISSING
-
-    def cli_default(self) -> Any:
-        if self.default is not dataclasses.MISSING:
-            return self.default
-        if self.default_factory is not dataclasses.MISSING:
-            return self.default_factory()
-        return None
+    def default(self) -> Any:
+        if self._default is not dataclasses.MISSING:
+            return self._default
+        if self._default_factory is not dataclasses.MISSING:
+            return self._default_factory()
+        return dataclasses.MISSING
 
     def cli_kwargs(self) -> dict:
-        kwargs = {"required": self.required}
-        if not self.required:
-            kwargs["default"] = self.cli_default()
+        kwargs = {} if self.default is dataclasses.MISSING else {"default": self.default}
+        if self.action is not None:
+            return kwargs | {"action": self.action} | self.action_kwargs
+        kwargs["required"] = self.required
         if self.kind == "bool":
             return kwargs | {"action": "store_true"}
-        kwargs["type"] = json.loads if self.kind == "json" else self.type_
+        kwargs["type"] = self.parser()
         kwargs["metavar"] = self.field.upper()
-        if self.kind == "seq" or self.nargs:
+        if self.kind == "seq" and self.type_parser is None:
             kwargs["nargs"] = self.nargs or "+"
+        elif self.nargs:
+            kwargs["nargs"] = self.nargs
         if self.choices:
             kwargs["choices"] = self.choices
+        if self.const is not None:
+            kwargs["const"] = self.const
         return kwargs
+
+    def parser(self) -> Any:
+        return self.type_parser or (json.loads if self.kind == "json" else self.type_)
 
     def dump(self, value: Any) -> str:
         if self.kind == "bool":
@@ -111,7 +136,10 @@ class _Field:
 
     def resolve(self, raw: str | None) -> Any:
         if raw is None:
-            return self.cli_default()
+            default = self.default
+            if default is dataclasses.MISSING:
+                raise ValueError(f"{self.cli}: no value (env {self.env} unset)")
+            return default
         try:
             if self.kind == "bool":
                 return raw.strip().lower() in frozenset({"1", "true", "yes", "on"})
@@ -122,6 +150,11 @@ class _Field:
             return self.type_(raw)
         except Exception as exc:
             raise ValueError(f"{self.env}={raw!r} invalid: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 class PluginConfig:
@@ -151,6 +184,8 @@ class PluginConfig:
         )
         def add_args(result, parser):
             for fl in self._fields:
+                if fl.no_cli:
+                    continue
                 parser.add_argument(
                     fl.cli,
                     *fl.aliases,
@@ -162,7 +197,7 @@ class PluginConfig:
         @plugin_hook(
             "sglang.srt.server_args.ServerArgs.from_cli_args", type=HookType.AROUND
         )
-        def bridge(original_fn, cls, namespace):
+        def from_args(original_fn, cls, namespace):
             for fl in self._fields:
                 value = getattr(namespace, fl.dest, None)
                 if value is not None:
@@ -170,7 +205,7 @@ class PluginConfig:
             return original_fn(cls, namespace)
 
 
-def plugin_config(cls: type, *, prefix: str):
+def plugin_config(cls: type, *, prefix: str, doc: str | None = None):
     """Install CLI hooks and return a getter for the config."""
     cfg = PluginConfig(cls, prefix=prefix)
     cfg.install()
@@ -179,5 +214,5 @@ def plugin_config(cls: type, *, prefix: str):
         return cfg.read()
 
     get.__name__ = get.__qualname__ = f"get_{prefix}"
-    get.__doc__ = "Get sglang Attention-FFN Disaggregation (AFD) plugin config."
+    get.__doc__ = doc
     return get
