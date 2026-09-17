@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sgl-afd-plugin"
+version = "0.1.0"
+
+[project.entry-points."sglang.srt.plugins"]
+sgl_afd_plugin = "sgl_afd_plugin:register"
