@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from sgl_afd_plugin.srt.utils.config_utils import A, Arg, plugin_config
+from sgl_afd_plugin.afd.utils.config_utils import A, Arg, plugin_config
 
 
 @dataclass
@@ -34,8 +34,9 @@ class AFDConfig:
     ]
 
 
-get_config = plugin_config(
-    AFDConfig,
-    prefix="afd",
-    doc="Get sglang Attention-FFN Disaggregation (AFD) plugin config.",
-)
+AFD_CONFIG = plugin_config(AFDConfig, prefix="afd")
+
+
+def get_config() -> AFDConfig:
+    """Get sglang Attention-FFN Disaggregation (AFD) plugin config."""
+    return AFD_CONFIG.read()

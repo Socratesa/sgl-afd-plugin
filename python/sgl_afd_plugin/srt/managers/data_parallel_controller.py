@@ -18,8 +18,8 @@ from sglang.srt.runtime_context import (
 from sglang.srt.server_args import DP_ATTENTION_HANDSHAKE_PORT_DELTA
 from sglang.srt.utils.network import NetworkAddress, get_zmq_socket
 
-from sgl_afd_plugin.srt.config import get_config as get_afd
-from sgl_afd_plugin.srt.utils.common import override_obj, override_list
+from sgl_afd_plugin.afd.config import get_config as get_afd
+from sgl_afd_plugin.afd.utils.common import override_obj, override_list
 
 logger = logging.getLogger(__name__)
 

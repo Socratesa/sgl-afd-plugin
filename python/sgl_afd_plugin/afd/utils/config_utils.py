@@ -176,43 +176,26 @@ class PluginConfig:
             logger.info(f"{self._prefix}_config={dataclasses.asdict(self._instance)}")
         return self._instance
 
-    def install(self) -> None:
-        from sglang.srt.plugins.hook_registry import HookType, plugin_hook
+    def add_cli_args(self, parser: Any) -> None:
+        for fl in self._fields:
+            if fl.no_cli:
+                continue
+            parser.add_argument(
+                fl.cli,
+                *fl.aliases,
+                dest=fl.dest,
+                help=fl.help,
+                **fl.cli_kwargs(),
+            )
 
-        @plugin_hook(
-            "sglang.srt.server_args.ServerArgs.add_cli_args", type=HookType.AFTER
-        )
-        def add_args(result, parser):
-            for fl in self._fields:
-                if fl.no_cli:
-                    continue
-                parser.add_argument(
-                    fl.cli,
-                    *fl.aliases,
-                    dest=fl.dest,
-                    help=fl.help,
-                    **fl.cli_kwargs(),
-                )
-
-        @plugin_hook(
-            "sglang.srt.server_args.ServerArgs.from_cli_args", type=HookType.AROUND
-        )
-        def from_args(original_fn, cls, namespace):
-            for fl in self._fields:
-                value = getattr(namespace, fl.dest, None)
-                if value is not None:
-                    os.environ[fl.env] = fl.dump(value)
-            return original_fn(cls, namespace)
+    def export_env(self, namespace: Any) -> None:
+        """Copy parsed values onto os.environ so subprocesses inherit them."""
+        for fl in self._fields:
+            value = getattr(namespace, fl.dest, None)
+            if value is not None:
+                os.environ[fl.env] = fl.dump(value)
 
 
-def plugin_config(cls: type, *, prefix: str, doc: str | None = None):
-    """Install CLI hooks and return a getter for the config."""
-    cfg = PluginConfig(cls, prefix=prefix)
-    cfg.install()
-
-    def get() -> Any:
-        return cfg.read()
-
-    get.__name__ = get.__qualname__ = f"get_{prefix}"
-    get.__doc__ = doc
-    return get
+def plugin_config(cls: type, *, prefix: str) -> PluginConfig:
+    """Build a config group. Its CLI/env hooks live in srt/server_args.py."""
+    return PluginConfig(cls, prefix=prefix)

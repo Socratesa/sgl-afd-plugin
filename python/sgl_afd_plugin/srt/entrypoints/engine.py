@@ -2,7 +2,7 @@
 
 from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
-from sgl_afd_plugin.srt.utils.common import override_mod
+from sgl_afd_plugin.afd.utils.common import override_mod
 
 
 def _around_launch_scheduler_processes(original_fn, cls, server_args, port_args,
