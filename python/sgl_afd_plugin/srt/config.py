@@ -35,7 +35,7 @@ class AFDConfig:
 
 
 get_config = plugin_config(
-    AFDConfig, 
+    AFDConfig,
     prefix="afd",
     doc="Get sglang Attention-FFN Disaggregation (AFD) plugin config.",
 )

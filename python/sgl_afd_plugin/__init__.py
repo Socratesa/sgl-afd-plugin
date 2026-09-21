@@ -1,6 +1,6 @@
 """Sglang AFD Plugin Entry Point."""
 
-import os 
+import os
 import warnings
 
 from sglang.srt.plugins.hook_registry import HookRegistry, HookType
@@ -15,7 +15,13 @@ def register():
     # Imported for its side effect: this import registers the CLI hooks.
     from sgl_afd_plugin.srt.config import get_config    # noqa: F401
 
-    pass
+    from sgl_afd_plugin.srt.entrypoints.engine import install as eng_install
+    from sgl_afd_plugin.srt.managers.data_parallel_controller import (
+        install as dpc_install,
+    )
+
+    eng_install()
+    dpc_install()
 
 
 if not SGLANG_AFD_PLUGIN_ENABLED:
