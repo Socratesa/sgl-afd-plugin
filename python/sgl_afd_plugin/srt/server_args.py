@@ -2,21 +2,17 @@
 
 from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
-from sgl_afd_plugin.afd.config import AFD_CONFIG
+from sgl_afd_plugin.afd.config import _AFD
 
 
 def _after_add_cli_args(result, parser):
-    AFD_CONFIG.add_cli_args(parser)
+    _AFD.add_cli_args(parser)
+    return result
 
 
-def _around_from_cli_args(original_fn, *args):
-    """``args`` is ``(cls, namespace)``.
-
-    Env must be written before ServerArgs is constructed, so the spawned schedulers
-    inherit it. ``args[-1]`` is the namespace either way.
-    """
-    AFD_CONFIG.export_env(args[-1])
-    return original_fn(*args)
+def _after_from_cli_args(result, cls, namespace):
+    _AFD.export_env(namespace)
+    return result
 
 
 def install():
@@ -27,6 +23,6 @@ def install():
     )
     HookRegistry.register(
         "sglang.srt.server_args.ServerArgs.from_cli_args",
-        _around_from_cli_args,
-        HookType.AROUND,
+        _after_from_cli_args,
+        HookType.AFTER,
     )

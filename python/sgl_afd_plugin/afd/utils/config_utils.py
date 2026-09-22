@@ -194,8 +194,3 @@ class PluginConfig:
             value = getattr(namespace, fl.dest, None)
             if value is not None:
                 os.environ[fl.env] = fl.dump(value)
-
-
-def plugin_config(cls: type, *, prefix: str) -> PluginConfig:
-    """Build a config group. Its CLI/env hooks live in srt/server_args.py."""
-    return PluginConfig(cls, prefix=prefix)
