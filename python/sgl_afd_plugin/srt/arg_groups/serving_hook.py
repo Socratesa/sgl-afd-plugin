@@ -1,11 +1,8 @@
 """AFD overrides for SGLang's server-argument resolution."""
 
-import logging
-
 from sglang.srt.arg_groups.overrides import resolving_view
 from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
-logger = logging.getLogger(__name__)
 
 # AFD turns some DP slots into FFN slots that never serve requests. Only the dispatch
 # paths that consult the controller's active-worker set stay correct under that, so the
