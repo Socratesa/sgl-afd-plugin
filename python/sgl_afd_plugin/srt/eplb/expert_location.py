@@ -65,6 +65,8 @@ def _install_layout(layout) -> None:
         )
 
     # Padding for the attention ranks' slots, which hold no expert.
+    # Also necessary for the topk remap: _eplb_remap_enabled() (topk.py:1544) returns
+    # True, otherwise topk_ids_logical_to_physical is skipped.
     get_context().override(
         "afd.expert_location",
         ep_num_redundant_experts=layout.ep_num_redundant_experts,
