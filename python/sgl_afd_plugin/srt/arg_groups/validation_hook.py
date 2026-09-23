@@ -3,6 +3,9 @@
 from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 from sglang.srt.arg_groups.overrides import resolving_view
 
+# Mirrors is_deepep_class_backend() (layers/moe/utils.py:608).
+ALLOWED_MOE_A2A_BACKENDS = ("deepep", "deepep_v2", "mooncake", "mori", "pplx")
+
 
 def _after_check_server_args(result, server_args):
     cfg = resolving_view(server_args)
@@ -24,6 +27,29 @@ def _after_check_server_args(result, server_args):
             f"AFD requires --nnodes > 1 (got {cfg.nnodes}): ATTN and FFN are "
             "started as separate launches (--afd-role is per launch) and must "
             "join one distributed world."
+        )
+    if cfg.enable_eplb:
+        raise ValueError(
+            "AFD refuses --enable-eplb: EPLB reads physical_to_logical_map as a "
+            "dense index, but the attention ranks' slots are -1."
+        )
+    if cfg.expert_distribution_recorder_mode is not None:
+        raise ValueError(
+            "AFD refuses --expert-distribution-recorder-mode="
+            f"{cfg.expert_distribution_recorder_mode!r}: it scatters over "
+            "physical_to_logical_map, whose attention slots are -1 "
+            "(--enable-eplb sets this mode implicitly)."
+        )
+    if cfg.ep_dispatch_algorithm == "lp":
+        raise ValueError(
+            "AFD refuses --ep-dispatch-algorithm lp: its solver bincounts "
+            "physical_to_logical_map, whose attention slots are -1."
+        )
+    if cfg.moe_a2a_backend not in ALLOWED_MOE_A2A_BACKENDS:
+        raise ValueError(
+            f"AFD requires a deepep-class --moe-a2a-backend (got "
+            f"{cfg.moe_a2a_backend!r}): any other backend takes the model's "
+            "non-a2a forward path, which never applies the logical->physical remap."
         )
 
     return result

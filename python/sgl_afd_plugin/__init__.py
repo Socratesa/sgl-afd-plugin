@@ -14,6 +14,7 @@ SGLANG_AFD_PLUGIN_ENABLED = bool(int(os.getenv("SGLANG_AFD_PLUGIN_ENABLED", "0")
 def register():
     from sgl_afd_plugin.srt.server_args import install as sa_install
     from sgl_afd_plugin.srt.arg_groups import install as ag_install
+    from sgl_afd_plugin.srt.eplb import install as eplb_install
     from sgl_afd_plugin.srt.entrypoints.engine import install as eng_install
     from sgl_afd_plugin.srt.managers.data_parallel_controller import (
         install as dpc_install,
@@ -21,6 +22,7 @@ def register():
 
     sa_install()
     ag_install()
+    eplb_install()
     eng_install()
     dpc_install()
 
