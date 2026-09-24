@@ -78,7 +78,7 @@ def _install_layout(layout) -> None:
             "physical expert width would not match the AFD layout."
         )
     logger.info(
-        "[AFD] ffn ep ranks=%s attn ep ranks=%s physical experts=%d local=%d",
+        "[AFD] ffn ep ranks=%s, attn ep ranks=%s, physical experts=%d, local=%d",
         list(layout.ffn_ep_ranks),
         list(layout.attn_ep_ranks),
         layout.num_physical_experts,

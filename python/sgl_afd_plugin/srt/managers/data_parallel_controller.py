@@ -107,7 +107,7 @@ def _after_data_parallel_controller_init(result, self, *args, **kwargs):
     self.dp_budget.ffn_slots = ffn_slots
 
     logger.info(
-        "[AFD][DPC] ffn slots=%s active dp workers=%s",
+        "[AFD][DPC] ffn slots=%s, active dp workers=%s",
         sorted(ffn_slots),
         self.routing_active,
     )
