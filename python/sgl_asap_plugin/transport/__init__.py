@@ -1,24 +1,26 @@
-"""A<->F transport: static arenas, single-sided writes, flags with backpressure (NVLink via CUDA IPC).
+"""A<->F transport over NVLink: static CUDA-IPC arenas, one-sided copies, stream-memop flags, backpressure.
 
-Independent of sglang and torch. See roadmap 02b for the protocol and 02b section 12 for slot
-ownership, epochs and failure handling. Submodules load lazily, so importing this package
-(or ``arena`` / ``protocol``) does not need libcuda.
+Independent of sglang and torch, so it is tested on its own (tests/test_transport.py).
+* layout.py   what both sides agree on: memory layout (with diagrams), doorbell word, errors
+* channel.py  A side: AfdChannel (connect, send, wait) and the watchdog that turns a dead F into an error
+* server.py   F side: FfnServer (handshake, polling, job assembly, reply)
+* cuda.py     the CUDA driver calls (ctypes)
+
+Submodules load lazily: importing the package or ``layout`` does not need libcuda.
 """
 
 import importlib
 
 _EXPORTS = {
-    "Geometry": "arena",
+    "Geometry": "layout",
+    "TransportError": "layout",
+    "HandshakeError": "layout",
+    "ChannelPoisoned": "layout",
     "AfdChannel": "channel",
-    "Ticket": "ticket",
+    "Ticket": "channel",
     "FfnServer": "server",
     "Job": "server",
     "Row": "server",
-    "Doorbell": "protocol",
-    "TransportError": "protocol",
-    "HandshakeError": "protocol",
-    "ProtocolError": "protocol",
-    "ChannelPoisoned": "protocol",
 }
 __all__ = sorted(_EXPORTS)
 
