@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sgl-asap-plugin"
+version = "0.1.0"
+description = "SGLang plugin: ASAP-style prefill Attention-FFN disaggregation (pure-DP attention replicas + standalone expert service)"
+readme = "README.md"
+requires-python = ">=3.10"
+# sglang itself is provided by the environment; it is deliberately not pinned here.
+dependencies = []
+
+[project.entry-points."sglang.srt.plugins"]
+sgl_asap_plugin = "sgl_asap_plugin:register"
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+
+[tool.setuptools.packages.find]
+where = ["python"]
