@@ -306,49 +306,58 @@ def collect(port, prompts, tail=256, rank=None):
 
 def compare(ref, got):
     """Alignment metrics of two collect() results on the same prompts."""
-    match = ties = 0
+    match = 0
     d_out, d_prompt, errors = [], [], sum("error" in g for g in got)
     for r, g in zip(ref, got):
         if "error" in r or "error" in g:
             continue
         top_r, top_g = dict((t, lp) for lp, t in r["top"]), dict((t, lp) for lp, t in g["top"])
-        if r["token"] == g["token"]:
-            match += 1
-        elif len(r["top"]) > 1 and r["top"][0][0] - r["top"][1][0] < 0.05:
-            ties += 1  # the reference itself was undecided between its two best tokens
+        match += r["token"] == g["token"]
         d_out += [abs(top_r[t] - top_g[t]) for t in top_r if t in top_g]
         d_prompt += [abs(a - b) for a, b in zip(r["prompt_lp"], g["prompt_lp"])]
     d_prompt.sort()
     pct = lambda q: d_prompt[min(len(d_prompt) - 1, int(q * len(d_prompt)))] if d_prompt else float("nan")
-    return {"n": len(ref), "errors": errors, "first_token_match": match, "near_ties": ties,
+    return {"n": len(ref), "errors": errors, "first_token_match": match,
             "max_d_out": max(d_out, default=float("nan")), "mean_d_prompt": sum(d_prompt) / max(1, len(d_prompt)),
             "p99_d_prompt": pct(0.99), "max_d_prompt": pct(1.0), "prompt_positions": len(d_prompt)}
 
 
-def reference(rep, args, f_gpus, prompts):
-    """Stock sglang, colocated (--tp E --ep E: the same per-rank expert split as the F service)."""
-    path = os.path.join(args.out, "reference.json")
-    if args.reuse_reference and os.path.exists(path):
-        with open(path) as f:
-            return json.load(f)
-    port, e = args.port + 50, len(f_gpus)
-    argv = sv.launch_server_argv(args.model, port, "--tp-size", e, "--ep-size", e, "--chunked-prefill-size", args.n_max,
-                                 "--disable-cuda-graph")
-    env = sv.server_env(",".join(map(str, f_gpus)))
-    env.pop("SGLANG_PLUGINS")
-    env["SGLANG_PLUGINS"] = "none"  # the stock path: no plugin at all
-    srv, _, ready = sv.start_server(lambda: sv.Server("reference_colocated", argv, env, args.out, port), args.startup_timeout)
-    try:
-        rep.add("R0", f"colocated reference (stock sglang --tp {e} --ep {e}) comes up", "ready" if ready else srv.log_path,
-                "/health 200", ready)
-        if not ready:
-            return None
-        ref = collect(port, prompts)
-    finally:
-        srv.stop()
-    with open(path, "w") as f:
-        json.dump(ref, f)
-    return ref
+def reference(rep, args, ref_gpus, prompts):
+    """Two stock (plugin-free) colocated layouts on the same prompts -> (reference, noise floor).
+
+    The reference is --tp E --ep E (the F service's per-rank expert split). The second layout (attention DP,
+    attention TP 1 like an A replica) shows how far two correct deployments of this model drift apart in bf16:
+    the alignment criteria of the AFD run are relative to that distance, not to zero.
+    """
+    e, port, results = len(ref_gpus), args.port + 50, []
+    layouts = [("reference", ("--tp-size", e, "--ep-size", e)),
+               ("reference2", ("--tp-size", e, "--dp-size", e, "--enable-dp-attention", "--ep-size", e))]
+    for name, flags in layouts:
+        path = os.path.join(args.out, f"{name}.json")
+        if args.reuse_reference and os.path.exists(path):
+            with open(path) as f:
+                results.append(json.load(f))
+            continue
+        argv = sv.launch_server_argv(args.model, port, *flags, "--chunked-prefill-size", args.n_max,
+                                     "--disable-cuda-graph")
+        env = sv.server_env(",".join(map(str, ref_gpus)), SGLANG_PLUGINS="none")  # no plugin at all
+        srv, _, ready = sv.start_server(lambda: sv.Server(name, argv, env, args.out, port), args.startup_timeout)
+        try:
+            rows = collect(port, prompts) if ready else None
+        finally:
+            srv.stop()
+        if rows is None:
+            rep.add("R0", f"stock layout {' '.join(map(str, flags))} comes up", srv.log_path, "/health 200", False)
+            return None, None
+        with open(path, "w") as f:
+            json.dump(rows, f)
+        results.append(rows)
+    noise = compare(*results)
+    rep.add("R0", f"noise floor: stock --tp {e} --ep {e} vs stock attention-DP --tp {e} --dp {e} --ep {e}",
+            f"first token {noise['first_token_match']}/{noise['n']}; prompt positions mean {noise['mean_d_prompt']:.4f}, "
+            f"p99 {noise['p99_d_prompt']:.4f}; output top-5 max {noise['max_d_out']:.3f}",
+            "measured, not judged: both are correct deployments", True)
+    return results[0], noise
 
 
 def start_afd(args, replicas, a_gpus, f_gpus, tag):
@@ -381,7 +390,7 @@ def soak(port, prompts_pool, count, concurrency, rank=None, seed=0):
     return sum(not ok for ok, _ in results), max(s for _, s in results), time.time() - t0
 
 
-def phase_one_replica(rep, args, a_gpus, f_gpus, prompts, ref):
+def phase_one_replica(rep, args, a_gpus, f_gpus, prompts, ref, noise):
     e = len(f_gpus)
     f, a, ready, secs = start_afd(args, 1, a_gpus[:1], f_gpus, "afd_1a")
     try:
@@ -407,16 +416,20 @@ def phase_one_replica(rep, args, a_gpus, f_gpus, prompts, ref):
         served = [sv.generate(args.port, input_ids=(prompts[-1] * 4)[:n], timeout=300)[:2] for n in sizes]
         rep.add("E5", "requests go through every MoE layer", dict(zip(sizes, [f"{s:.2f}s" if ok else "FAIL" for ok, s in served])),
                 "all succeed (16000 tokens = 2 chunks of n_max)", all(ok for ok, _ in served))
+        got = collect(args.port, prompts)
+        with open(os.path.join(args.out, "afd_1a.json"), "w") as fh:
+            json.dump(got, fh)  # the PR-07 runs must reproduce these exactly
         if ref:
-            m = compare(ref, collect(args.port, prompts))
+            m = compare(ref, got)
             rep.add("A1", f"first token vs the colocated reference ({m['n']} prompts, 128..{args.max_prompt} tokens)",
-                    f"{m['first_token_match']}/{m['n']} identical, {m['near_ties']} near-ties, {m['errors']} errors",
-                    "100% identical except reference near-ties (top-2 gap < 0.05), 0 errors",
-                    m["errors"] == 0 and m["first_token_match"] + m["near_ties"] == m["n"])
-            rep.add("A2", "logprob deltas vs the colocated reference",
-                    f"output top-5 max |d| {m['max_d_out']:.4f}; {m['prompt_positions']} prompt positions: mean "
-                    f"{m['mean_d_prompt']:.4f}, p99 {m['p99_d_prompt']:.4f}, max {m['max_d_prompt']:.4f}",
-                    "output max |d| <= 0.05; prompt-position mean <= 0.01", m["max_d_out"] <= 0.05 and m["mean_d_prompt"] <= 0.01)
+                    f"{m['first_token_match']}/{m['n']} identical, {m['errors']} errors",
+                    f">= the stock-vs-stock floor ({noise['first_token_match']}/{noise['n']}) - 1, 0 errors",
+                    m["errors"] == 0 and m["first_token_match"] >= noise["first_token_match"] - 1)
+            rep.add("A2", f"logprob deltas vs the colocated reference ({m['prompt_positions']} prompt positions)",
+                    f"mean {m['mean_d_prompt']:.4f}, p99 {m['p99_d_prompt']:.4f}, max {m['max_d_prompt']:.3f}; "
+                    f"output top-5 max {m['max_d_out']:.3f}",
+                    f"mean and p99 <= 1.25 x the floor ({noise['mean_d_prompt']:.4f}, {noise['p99_d_prompt']:.4f})",
+                    m["mean_d_prompt"] <= 1.25 * noise["mean_d_prompt"] and m["p99_d_prompt"] <= 1.25 * noise["p99_d_prompt"])
         errors, slowest, wall = soak(args.port, [p[:4096] for p in prompts], args.soak_requests, 16)
         rep.add("A3", f"soak: {args.soak_requests} requests, 16 concurrent, 128..4096 tokens",
                 f"{errors} errors, slowest {slowest:.1f}s, {wall:.0f}s wall", "0 errors, no request > 600 s", errors == 0)
@@ -436,7 +449,7 @@ def windows(prompts, n, count, start=0):
     return [pool[(start + i * 997) % (len(pool) - n):][:n] for i in range(count)]
 
 
-def phase_replicas(rep, args, d, a_gpus, f_gpus, prompts, ref):
+def phase_replicas(rep, args, d, a_gpus, f_gpus, prompts):
     """PR-07: D replicas share one F with no synchronization between them."""
     import threading
 
@@ -451,12 +464,15 @@ def phase_replicas(rep, args, d, a_gpus, f_gpus, prompts, ref):
                 and all(r["world"] == "1" and r["ok"] == r["total"] == "9" for r in ranks))
         if not ready:
             return
-        if ref:
-            per = [compare(ref[:16], collect(args.port, prompts[:16], rank=r)) for r in range(d)]
-            rep.add(f"{tag}.1", "numerics per replica vs the colocated reference (first 16 prompts)",
-                    [(m["first_token_match"], round(m["max_d_out"], 4)) for m in per],
-                    "every replica: 16/16 first tokens (or reference near-ties), output max |d| <= 0.05",
-                    all(m["errors"] == 0 and m["first_token_match"] + m["near_ties"] == 16 and m["max_d_out"] <= 0.05
+        one = os.path.join(args.out, "afd_1a.json")
+        if os.path.exists(one):
+            with open(one) as fh:
+                base = json.load(fh)[:16]
+            per = [compare(base, collect(args.port, prompts[:16], rank=r)) for r in range(d)]
+            rep.add(f"{tag}.1", "every replica reproduces the 1-replica AFD results (first 16 prompts)",
+                    [(m["first_token_match"], m["max_d_out"], m["max_d_prompt"]) for m in per],
+                    "each replica: 16/16 first tokens, every logprob bit-identical (max |d| = 0)",
+                    all(m["errors"] == 0 and m["first_token_match"] == 16 and m["max_d_out"] == 0 and m["max_d_prompt"] == 0
                         for m in per))
         errors, slowest, wall = soak(args.port, windows(prompts, 2048, 64, 11), args.soak_requests * d, 8 * d)
         rep.add(f"{tag}.2", f"soak: {args.soak_requests * d} requests, {8 * d} concurrent, routed by sglang (total_tokens)",
@@ -507,12 +523,13 @@ def _layer_skew(trace):
 def stage_e2e(rep, args):
     a_gpus, f_gpus = [int(x) for x in args.a_gpus.split(",")], [int(x) for x in args.f_gpus.split(",")]
     prompts = build_prompts(args.model, args.prompts, 128, args.max_prompt, args.out)
-    ref = None if args.skip_reference else reference(rep, args, f_gpus, prompts)
+    ref_gpus = [int(x) for x in args.ref_gpus.split(",")] if args.ref_gpus else f_gpus
+    ref, noise = (None, None) if args.skip_reference else reference(rep, args, ref_gpus, prompts)
     for d in args.replicas:
         if d == 1:
-            phase_one_replica(rep, args, a_gpus, f_gpus, prompts, ref)
+            phase_one_replica(rep, args, a_gpus, f_gpus, prompts, ref, noise)
         elif d <= len(a_gpus):
-            phase_replicas(rep, args, d, a_gpus, f_gpus, prompts, ref)
+            phase_replicas(rep, args, d, a_gpus, f_gpus, prompts)
 
 
 def main():
@@ -523,8 +540,9 @@ def main():
     ap.add_argument("--control-gpus", default="2,3", help="m0: GPUs of the stock attention-DP control")
     ap.add_argument("--a-gpus", default="0,1", help="e2e: GPUs of the A replicas (one each)")
     ap.add_argument("--f-gpus", default="4,5,6,7", help="e2e: GPUs of the F ranks (also the colocated reference)")
-    ap.add_argument("--replicas", type=lambda s: [int(x) for x in s.split(",")], default=[1, 2],
-                    help="e2e: replica counts to run, e.g. 1,2")
+    ap.add_argument("--ref-gpus", default=None, help="e2e: GPUs of the colocated reference (default: --f-gpus)")
+    ap.add_argument("--replicas", type=lambda s: [int(x) for x in s.split(",") if x], default=[1, 2],
+                    help="e2e: replica counts to run, e.g. 1,2 ('' = only the reference)")
     ap.add_argument("--n-max", type=int, default=8192, help="e2e: --asap-n-max and --chunked-prefill-size")
     ap.add_argument("--prompts", type=int, default=64)
     ap.add_argument("--max-prompt", type=int, default=16384)
@@ -535,7 +553,7 @@ def main():
     ap.add_argument("--rdv-port", type=int, default=9600)
     ap.add_argument("--startup-timeout", type=int, default=2400)
     ap.add_argument("--out", default=None, help="logs and report (default /tmp/asap_reports/<stage>)")
-    ap.add_argument("--reuse-reference", action="store_true", help="e2e: reuse out/reference.json if present")
+    ap.add_argument("--reuse-reference", action="store_true", help="e2e: reuse out/reference*.json if present")
     ap.add_argument("--skip-reference", action="store_true")
     ap.add_argument("--skip-gpu", action="store_true", help="m0: CPU checks only")
     ap.add_argument("--skip-control", action="store_true", help="m0: no stock attention-DP control")

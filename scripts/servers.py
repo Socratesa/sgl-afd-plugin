@@ -28,10 +28,14 @@ FFN_RANK_RE = re.compile(r"\[ASAP\] ffn rank (\d+) (ready|stats): (\{.*\})")
 
 
 def server_env(gpus: str, **extra) -> dict:
+    """Environment of a server. The venv's bin directory goes first on PATH, as after ``source activate``:
+    FlashInfer's JIT runs whichever ninja PATH finds, and ninja 1.11 (/usr/local/bin) and 1.13 (the venv) do not
+    share their dependency logs, so switching between them recompiles the MXFP4 MoE module (~15 minutes)."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("ASAP_")}
     env.pop("NCCL_DEBUG_FILE", None)
     env.update({"CUDA_VISIBLE_DEVICES": gpus, "SGLANG_PLUGINS": "sgl_asap_plugin", "NCCL_DEBUG": "WARN",
-                "SGLANG_JIT_DEEPGEMM_PRECOMPILE": "0", "PYTHONDONTWRITEBYTECODE": "1"})
+                "SGLANG_JIT_DEEPGEMM_PRECOMPILE": "0", "PYTHONDONTWRITEBYTECODE": "1",
+                "PATH": os.path.dirname(sys.executable) + os.pathsep + os.environ.get("PATH", "")})
     env.update(extra)
     return env
 

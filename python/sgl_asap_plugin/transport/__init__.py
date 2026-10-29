@@ -6,7 +6,9 @@ Independent of sglang and torch, so it is tested on its own (tests/test_transpor
 * server.py   F side: FfnServer (handshake, polling, job assembly, reply)
 * cuda.py     the CUDA driver calls (ctypes)
 
-Submodules load lazily: importing the package or ``layout`` does not need libcuda.
+The plugin uses only AfdChannel.{connect, send, wait, check, close} on A and FfnServer.{start, serve_forever,
+reply, close} plus Job / Row on F; another backend (RDMA, PR-18) provides the same methods. Submodules load
+lazily: importing the package or ``layout`` does not need libcuda.
 """
 
 import importlib

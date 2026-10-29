@@ -241,7 +241,8 @@ class FfnService:
         self.proc = None
 
     def start(self, timeout=1200):
-        env = dict(os.environ)
+        # the venv's ninja first, as after `source activate` (see scripts/servers.py: server_env)
+        env = dict(os.environ, PATH=os.path.dirname(sys.executable) + os.pathsep + os.environ.get("PATH", ""))
         for k in ("ASAP_ROLE", "SGLANG_PLUGINS", "CUDA_VISIBLE_DEVICES"):
             env.pop(k, None)
         self.log = open(self.log_path, "w")

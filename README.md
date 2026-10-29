@@ -36,7 +36,7 @@ export SGLANG_PLUGINS=sgl_asap_plugin         # venv 里还装着旧的 sgl_afd_
 bash scripts/launch_asap.sh                   # 先起 F（GPU 4-7），再起 A（GPU 0），见脚本头部的变量
 ```
 
-A 与 F 必须看到同一组 GPU（同一个 `CUDA_VISIBLE_DEVICES`，用 `--base-gpu-id` 分卡），否则 CUDA IPC 打不开对端内存。F 第一次启动时 FlashInfer 会 JIT 编译 MXFP4 MoE 内核（约 15 分钟，之后走缓存）。
+A 与 F 必须看到同一组 GPU（同一个 `CUDA_VISIBLE_DEVICES`，用 `--base-gpu-id` 分卡），否则 CUDA IPC 打不开对端内存。F 第一次启动时 FlashInfer 会 JIT 编译 MXFP4 MoE 内核（约 15 分钟，之后走缓存）。始终在激活 venv 的环境里启动：JIT 用 PATH 上找到的 ninja，venv 里的 1.13 与 `/usr/local/bin` 的 1.11 互不认对方的依赖日志，来回切换会整模块重编。
 
 ## 配置
 
