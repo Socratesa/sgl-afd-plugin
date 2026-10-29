@@ -13,13 +13,14 @@ from dataclasses import dataclass
 from typing import Mapping, Optional
 
 from sgl_asap_plugin.errors import AsapConfigError
+from sgl_asap_plugin.transport.protocol import MAX_TOKENS
 
 ROLES = ("attn", "ffn")
 ENV_ROLE = "ASAP_ROLE"
 DEFAULT_RDV_ADDR = "127.0.0.1:29600"
 DEFAULT_N_MAX = 16384
 DEFAULT_SLOTS = 2
-MAX_N_MAX = 1 << 20
+MAX_N_MAX = MAX_TOKENS  # the transport doorbell's n_tokens field is 17 bits wide
 MAX_SLOTS = 8
 
 _ADDR_RE = re.compile(r"^[A-Za-z0-9_.\-]+:(\d{1,5})$")

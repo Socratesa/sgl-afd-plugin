@@ -1,8 +1,7 @@
 """Static layout math shared by both roles: expert partition across F ranks and arena sizing.
 
-Pure Python, so it can be unit-tested and later reused by the handshake (PR-03), which makes
-A and F agree on exactly these numbers before any data moves. Formulas follow the roadmap
-(02b section 6).
+Pure Python, so it can be unit-tested. Arena sizing is the transport's own Geometry (the object
+the A<->F handshake compares), so the plan printed before launch is the size actually allocated.
 """
 
 from __future__ import annotations
@@ -13,11 +12,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 from sgl_asap_plugin.errors import AsapConfigError
-
-HEADER_BYTES = 64  # per-slot message header
-ACT_BYTES = 2  # bf16 activations and partial sums
-TOPK_ID_BYTES = 4  # int32 logical expert id
-TOPK_W_BYTES = 4  # fp32 routing weight
+from sgl_asap_plugin.transport.arena import ACT_BYTES, TOPK_ID_BYTES, TOPK_W_BYTES, Geometry
 
 
 @dataclass(frozen=True)
@@ -63,13 +58,13 @@ class ArenaPlan:
 
 def arena_plan(num_replicas: int, replica_tp: int, ep_size: int, slots: int, n_max: int,
                hidden: int, topk: int) -> ArenaPlan:
-    per_token = hidden * ACT_BYTES + topk * (TOPK_ID_BYTES + TOPK_W_BYTES)
-    region = HEADER_BYTES + n_max * per_token
+    g = Geometry(num_a=num_replicas * replica_tp, group=replica_tp, slots=slots, n_max=n_max, hidden=hidden,
+                 topk=topk, num_f=ep_size)
     return ArenaPlan(
-        bytes_per_token=per_token,
-        region_bytes=region,
-        f_recv_arena_bytes=num_replicas * replica_tp * slots * region,
-        a_result_arena_bytes=ep_size * slots * n_max * hidden * ACT_BYTES,
+        bytes_per_token=hidden * ACT_BYTES + topk * (TOPK_ID_BYTES + TOPK_W_BYTES),
+        region_bytes=g.region_bytes,
+        f_recv_arena_bytes=g.recv_bytes,
+        a_result_arena_bytes=g.result_bytes,
     )
 
 

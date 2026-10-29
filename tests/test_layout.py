@@ -5,6 +5,7 @@ import unittest
 
 from sgl_asap_plugin.errors import AsapConfigError
 from sgl_asap_plugin.layout import arena_plan, partition_experts, read_moe_shape
+from sgl_asap_plugin.transport.arena import FLAGS_PAGE
 
 
 class TestExpertPartition(unittest.TestCase):
@@ -42,14 +43,15 @@ class TestArenaPlan(unittest.TestCase):
         # 02b section 6: D*T=4, S=2, n_max=16K, E=4 -> F recv ~1.08GB, A result ~1.07GB.
         plan = arena_plan(num_replicas=4, replica_tp=1, ep_size=4, slots=2, n_max=16384, hidden=4096, topk=6)
         self.assertEqual(plan.bytes_per_token, 8240)
-        self.assertEqual(plan.region_bytes, 64 + 16384 * 8240)
-        self.assertEqual(plan.f_recv_arena_bytes, 1_080_033_792)
-        self.assertEqual(plan.a_result_arena_bytes, 1_073_741_824)
+        self.assertEqual(plan.region_bytes, 16384 * 8240)
+        self.assertEqual(plan.f_recv_arena_bytes, 1_080_033_280)  # 8 regions
+        self.assertEqual(plan.a_result_arena_bytes, FLAGS_PAGE + 1_073_741_824)  # flags page + 8 segments
 
     def test_scales_with_replicas_and_tp(self):
         one = arena_plan(1, 1, 4, 2, 1024, 4096, 6)
         self.assertEqual(arena_plan(2, 2, 4, 2, 1024, 4096, 6).f_recv_arena_bytes, 4 * one.f_recv_arena_bytes)
-        self.assertEqual(arena_plan(1, 1, 8, 2, 1024, 4096, 6).a_result_arena_bytes, 2 * one.a_result_arena_bytes)
+        twice = arena_plan(1, 1, 8, 2, 1024, 4096, 6)
+        self.assertEqual(twice.a_result_arena_bytes - FLAGS_PAGE, 2 * (one.a_result_arena_bytes - FLAGS_PAGE))
 
 
 class TestMoeShape(unittest.TestCase):

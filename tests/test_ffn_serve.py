@@ -40,8 +40,8 @@ class TestFfnServe(unittest.TestCase):
         self.assertEqual((s["n_experts"], s["padded_experts"], s["experts_per_rank"]), (256, 256, 64))
         self.assertEqual(s["expert_ranges"], [[0, 64], [64, 128], [128, 192], [192, 256]])
         self.assertEqual((s["moe"]["hidden"], s["moe"]["topk"], s["moe"]["layers"]), (4096, 6, 43))
-        self.assertEqual(s["arena"]["f_recv_arena_bytes"], 1_080_033_792)  # 02b section 6: ~1.08GB
-        self.assertEqual(s["arena"]["a_result_arena_bytes"], 1_073_741_824)  # ~1.07GB
+        self.assertEqual(s["arena"]["f_recv_arena_bytes"], 1_080_033_280)  # 02b section 6: ~1.08GB
+        self.assertEqual(s["arena"]["a_result_arena_bytes"], 1_075_838_976)  # ~1.07GB, 2 MiB of it done flags
 
     def test_three_f_ranks_need_two_dummy_experts(self):
         proc = dry_run("--tp-size", "3", "--ep-size", "3", "--asap-num-replicas", "1", "--asap-replica-tp", "1")

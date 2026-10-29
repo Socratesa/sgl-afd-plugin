@@ -4,7 +4,7 @@ SGLang 插件：prefill 阶段的 ASAP 式 Attention-FFN 分离。
 
 - **A（attention）**：D 个**纯 DP** 副本（`--dp-size D`）。每个副本是独立的 WORLD，互不等待：没有每步 all-gather，没有 idle batch，没有每层 EP 集合通信。
 - **F（FFN）**：一个独立的专家服务，E 个 rank，纯 EP，rank 间零通信，用 `python -m sgl_asap_plugin.ffn_serve` 启动。
-- **A↔F**：CUDA IPC 静态 arena + 单边写 + flag（M1 起实现）。
+- **A↔F**：CUDA IPC 静态 arena + 单边写 + 64 位 doorbell，实现在 `python/sgl_asap_plugin/transport/`（PR-03，见 [docs/PR03.md](docs/PR03.md)）。
 
 本分支 `asap` 是孤儿分支，从零开始，不含旧插件（`master`，基于 attn-DP + DeepEP 的同步方案）的代码。设计与 PR 路线图在 `afd_dev/roadmap/sgl_codewalk/`（`02a`–`02d`、`03`、`03b`）。
 
@@ -13,7 +13,7 @@ SGLang 插件：prefill 阶段的 ASAP 式 Attention-FFN 分离。
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | **M0 地基** | 插件骨架、hook 装配与自检、`--asap-*` 配置、纯 DP 校验、F 入口骨架与布局计算、验收脚本 | 完成。验收标准见 [docs/M0.md](docs/M0.md)，结果见 [docs/M0_RESULTS.md](docs/M0_RESULTS.md) |
-| M1 | 传输库、A 侧 RemoteMoE、F 服务、单 A + F 逐 token 对齐 | 未开始 |
+| **M1 正确性** | PR-03 传输库、PR-04 A 侧 RemoteMoE、PR-05 F 服务、PR-06 单 A + F 逐 token 对齐 | 进行中。PR-03 完成：验收标准见 [docs/PR03.md](docs/PR03.md)，结果见 [docs/PR03_RESULTS.md](docs/PR03_RESULTS.md)。PR-04 起未开始 |
 
 ## 快速开始
 
@@ -31,6 +31,7 @@ python -m sgl_asap_plugin.ffn_serve --model-path $MODEL --tp-size 4 --ep-size 4 
 
 # 验收
 python scripts/m0_acceptance.py --gpus 0,1 --control-gpus 2,3
+python scripts/pr03_acceptance.py --gpus 0,1,2,3      # 传输库，需要 4 张卡
 
 # 选项清单（sglang serve --help 不加载插件，要用 launch_server）
 python -m sglang.launch_server --help | grep asap

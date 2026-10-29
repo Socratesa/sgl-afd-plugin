@@ -19,6 +19,7 @@ import time
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL = "/root/paddlejob/workspace/lhd_models/DeepSeek-V4-Flash-0731"
 MIN_TESTS = 43
+M0_TESTS = ["test_config", "test_validation", "test_layout", "test_hooks", "test_ffn_serve", "test_docs"]
 
 
 class Report:
@@ -49,7 +50,7 @@ def run_unit_tests(rep, out):
     env = dict(os.environ, PYTHONPATH=os.pathsep.join(paths))
     env.pop("ASAP_ROLE", None)
     start = time.time()
-    p = subprocess.run([sys.executable, "-W", "ignore", "-m", "unittest", "discover", "-s", "tests", "-v"],
+    p = subprocess.run([sys.executable, "-W", "ignore", "-m", "unittest", *M0_TESTS, "-v"],
                        cwd=REPO, env=env, capture_output=True, text=True)
     with open(os.path.join(out, "unit_tests.log"), "w") as f:
         f.write(p.stderr)
