@@ -25,6 +25,7 @@ ROUTED_EXPERT_RE = re.compile(r"^(?:model\.)?layers\.(\d+)\.ffn\.experts\.(\d+)\
 
 
 def keep_for_attn(name: str) -> bool:
+    """An A rank reads everything except routed experts and the MTP head."""
     return not (ROUTED_EXPERT_RE.match(name) or name.startswith("mtp."))
 
 

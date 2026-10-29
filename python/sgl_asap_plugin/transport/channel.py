@@ -105,6 +105,7 @@ class Watchdog(threading.Thread):
         return phase
 
     def run(self) -> None:
+        """Each SCAN_S: retire finished phases in order, time the oldest open one, release all on timeout."""
         self.device.activate()
         recovery = cu.stream_create()
         while not self._stop_evt.wait(self.SCAN_S):
@@ -132,6 +133,7 @@ class Watchdog(threading.Thread):
         cu.stream_destroy(recovery)
 
     def stop(self) -> None:
+        """Stop scanning and destroy the events (their streams must be idle)."""
         self._stop_evt.set()
         if self.is_alive():
             self.join(timeout=5.0)
@@ -238,6 +240,7 @@ class AfdChannel:
         self._recv, self._bells, self._maps, self._epoch, self.replies, self._result = [], [], [], [], [], None
 
     def _on_timeout(self, phase: _Phase) -> None:
+        """Watchdog callback: remember why, so check() / send() raise from now on."""
         self._poison = ChannelPoisoned(
             f"A rank {self.a}: {phase.what} did not complete within {self.timeout_s}s, F is dead or stuck; "
             "the results of every pending message are garbage until reconnect()")
@@ -248,6 +251,7 @@ class AfdChannel:
             raise self._poison
 
     def _done(self, f: int, slot: int) -> int:
+        """Device address of F rank f's done flag for ``slot`` in this rank's ResultArena."""
         return self._result + self.g.done_off(f, slot)
 
     def send(self, layer_id: int, slot: int, x_ptr: int, ids_ptr: int, w_ptr: int, n_tokens: int,

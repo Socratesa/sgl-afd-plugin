@@ -84,10 +84,12 @@ class ChannelPoisoned(TransportError):
 
 
 def align_up(n: int, a: int = ALIGN) -> int:
+    """Round n up to a multiple of a."""
     return -(-n // a) * a
 
 
 def pack_doorbell(seq: int, n_tokens: int, layer_id: int, epoch: int) -> int:
+    """The 64-bit doorbell (bit layout in the module docstring); out-of-range fields raise."""
     if not (1 <= n_tokens <= MAX_TOKENS and 0 <= layer_id <= MAX_LAYER and 1 <= epoch <= MAX_EPOCH):
         raise ValueError(f"doorbell field out of range: n_tokens={n_tokens} layer_id={layer_id} epoch={epoch}")
     return (seq & SEQ_MASK) | (n_tokens << 32) | (layer_id << 49) | (epoch << 59)
@@ -138,6 +140,7 @@ class Geometry:
         return self.num_a * self.slots * self.region_bytes
 
     def region_off(self, a: int, s: int) -> int:
+        """Offset of A rank a's slot-s region in an F rank's RecvArena."""
         return (a * self.slots + s) * self.region_bytes
 
     # ---- F rank: slot file (host) ----
@@ -146,6 +149,7 @@ class Geometry:
         return align_up(self.num_a * self.slots * BELL_STRIDE, 4096)
 
     def bell_off(self, a: int, s: int) -> int:
+        """Offset of A rank a's slot-s doorbell in an F rank's slot file."""
         return (a * self.slots + s) * BELL_STRIDE
 
     # ---- A rank: ResultArena (device) ----
@@ -162,9 +166,11 @@ class Geometry:
         return self.flags_bytes + self.num_f * self.slots * self.seg_bytes
 
     def done_off(self, f: int, s: int) -> int:
+        """Offset of F rank f's slot-s done flag in an A rank's ResultArena (flags page)."""
         return (f * self.slots + s) * FLAG_STRIDE
 
     def seg_off(self, f: int, s: int) -> int:
+        """Offset of F rank f's slot-s partial sum in an A rank's ResultArena."""
         return self.flags_bytes + (f * self.slots + s) * self.seg_bytes
 
     def as_dict(self) -> dict:

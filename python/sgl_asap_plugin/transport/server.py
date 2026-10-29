@@ -35,6 +35,7 @@ from sgl_asap_plugin.transport.layout import (MAX_EPOCH, PROTO_VERSION, SEQ_MASK
 
 @dataclass
 class Peer:
+    """A connected A rank: where its ResultArena is mapped and which epoch its messages must carry."""
     a: int
     result_base: int  # its ResultArena, mapped here through CUDA IPC
     epoch: int
@@ -58,6 +59,7 @@ class Row:
 
 @dataclass
 class Job:
+    """What the handler receives: one micro-batch of one layer of one replica, ready to compute."""
     replica: int
     slot: int
     layer_id: int
@@ -66,6 +68,8 @@ class Job:
 
 
 class FfnServer:
+    """One F rank's end of the transport (start -> serve_forever -> close); see the module docstring."""
+
     def __init__(self, f_rank: int, geometry: Geometry, *, device: int, run_dir: str, host: str = "127.0.0.1",
                  port: int = 0, seq_base: int = 0, model: Optional[dict] = None, info: Optional[dict] = None,
                  trace_len: int = 4096):
@@ -84,6 +88,7 @@ class FfnServer:
         self._prev_replica = None
 
     def start(self) -> "FfnServer":
+        """Allocate and zero the RecvArena and the slot file, then listen for A ranks."""
         g = self.g
         self.device.activate()
         self.recv_base = cu.mem_alloc(g.recv_bytes)
@@ -114,6 +119,7 @@ class FfnServer:
 
     # ---- handshake (handshake thread) ----
     def _accept_loop(self) -> None:
+        """Handshake thread: one JSON line in and out per A rank; a bad hello gets the reason back."""
         while not self._hs_stop.is_set():
             try:
                 conn, _ = self._srv.accept()
@@ -193,6 +199,7 @@ class FfnServer:
         return jobs
 
     def _row(self, a: int, s: int, word: int) -> Optional[Row]:
+        """Decode a doorbell; None (and a stats counter) for unknown peers, old epochs, bad sizes."""
         seq, n_tokens, layer_id, epoch = unpack_doorbell(word)
         peer = self.peers.get(a)
         if peer is None:
@@ -208,6 +215,7 @@ class FfnServer:
         return Row(a, s, seq, epoch, layer_id, n_tokens, base, base + self.g.ids_off, base + self.g.w_off)
 
     def _job(self, replica: int, slot: int, rows: Dict[int, Row]) -> Optional[Job]:
+        """Join one replica's T rows into a job; they must name the same layer."""
         ordered = [rows[j] for j in range(self.g.group)]
         if len({r.layer_id for r in ordered}) > 1:  # the TP ranks of one replica disagree: a protocol bug
             self.stats["group_mismatch"] += 1
@@ -251,6 +259,7 @@ class FfnServer:
                 time.sleep(idle_sleep_s)
 
     def close(self) -> None:
+        """Stop the handshake thread, unmap the A arenas, remove the slot file, free the RecvArena."""
         self._hs_stop.set()
         self._hs_thread.join(timeout=2.0)
         self._srv.close()

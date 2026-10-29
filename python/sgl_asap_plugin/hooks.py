@@ -36,6 +36,7 @@ TESTED_SGLANG = ("0.5.22",)
 
 @dataclass(frozen=True)
 class HookSpec:
+    """One row of the hook table: where, how, under which tier, and why."""
     target: str  # dotted path of the sglang function or method
     type: HookType
     params: Tuple[str, ...]  # expected leading parameter names of the target
@@ -97,6 +98,7 @@ def _check_server_args(server_args):
 
 
 def _on_model_loaded(result, model_runner):
+    """Weights are loaded, the KV pool is not sized yet: the moment to connect to F."""
     from sgl_asap_plugin import attn
 
     attn.on_model_loaded(model_runner, hooks_applied())
@@ -189,6 +191,7 @@ def _problem(spec: HookSpec):
 
 
 def preflight(specs: List[HookSpec]) -> None:
+    """Raise AsapInstallError listing every spec that cannot attach to this sglang."""
     problems = [p for p in map(_problem, specs) if p]
     if problems:
         raise AsapInstallError(f"[ASAP] hook targets do not match sglang {_sglang_version()}:\n  - "
@@ -221,6 +224,7 @@ def hooks_applied() -> str:
 
 
 def ensure_installed(specs: List[HookSpec]) -> None:
+    """Raise if a registered hook was not applied (sglang's loader only logs that)."""
     missing = missing_patches(specs)
     if missing:
         raise AsapInstallError("[ASAP] hooks registered but not applied (look for 'Failed to apply hooks' in the "
@@ -228,6 +232,7 @@ def ensure_installed(specs: List[HookSpec]) -> None:
 
 
 def _activate(cfg: AsapConfig) -> None:
+    """Register the tiers this role needs; the expert role never runs under sglang serve."""
     if cfg.role != "attn":
         raise AsapConfigError(f"[ASAP] role {cfg.role!r} does not run under sglang serve; start the expert "
                               "service with: python -m sgl_asap_plugin.ffn")

@@ -69,6 +69,7 @@ class ExpertStack:
     """The routed experts of F rank f: one FusedMoE per layer holding logical experts [lo, hi)."""
 
     def __init__(self, server_args, f: int, ffn_ranks: int, gpu_id: int):
+        """One FusedMoE per layer on gpu_id holding experts [lo, hi); load() fills them."""
         import torch
         from sglang.srt.configs.load_config import LoadConfig
         from sglang.srt.configs.model_config import ModelConfig
@@ -241,6 +242,7 @@ def _rank_main(ns, f: int, gpu_id: int, run_dir: str, conn, stop) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """sglang serve's flags plus --asap-*: F is configured like the model it serves."""
     from sglang.srt.server_args import ServerArgs
 
     parser = argparse.ArgumentParser(prog="python -m sgl_asap_plugin.ffn")
@@ -342,6 +344,7 @@ def serve(ns, layout: dict) -> int:
 
 
 def main(argv=None) -> int:
+    """Exit code: 0 ok, 1 a rank failed, 2 invalid configuration."""
     ns = build_parser().parse_args(argv)
     try:
         layout = plan(ns)

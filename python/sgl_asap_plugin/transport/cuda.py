@@ -133,6 +133,7 @@ def ipc_export(dptr: int) -> bytes:
 
 
 def ipc_open(raw: bytes) -> int:
+    """Map another process's buffer into this context (lazy peer access) -> device address."""
     handle = _IpcHandle()
     ctypes.memmove(byref(handle), raw, 64)
     ptr = c_uint64()
@@ -159,6 +160,7 @@ def host_unregister(host_ptr: int) -> None:
 
 # ---- streams, stream memory operations, events ----
 def stream_create() -> int:
+    """A non-blocking stream: it does not synchronize with the legacy default stream."""
     handle = c_void_p()
     _stream_create(byref(handle), _STREAM_NON_BLOCKING)
     return handle.value
@@ -198,6 +200,7 @@ def event_record(event: int, stream: int) -> None:
 
 
 def event_done(event: int) -> bool:
+    """Non-blocking: has the stream passed this event? (NOT_READY means not yet.)"""
     code = _event_query(event)
     if code == 0:
         return True

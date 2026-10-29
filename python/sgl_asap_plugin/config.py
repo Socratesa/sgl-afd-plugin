@@ -45,6 +45,7 @@ _FIELDS = ("rdv_addr",) + _INT_FIELDS  # dataclass field <-> --asap-<field> <-> 
 
 @dataclass(frozen=True)
 class AsapConfig:
+    """The --asap-* flags of one launch; __post_init__ reports every invalid field at once."""
     role: str
     rdv_addr: str = DEFAULT_RDV_ADDR  # F rank 0's handshake address; rank f uses port + f
     n_max: int = DEFAULT_N_MAX  # max tokens per message (one micro-batch of one TP rank): sizes the arenas
@@ -79,6 +80,7 @@ class AsapConfig:
         return self.role == "attn" and self.ffn_ranks is not None
 
     def endpoints(self) -> List[Tuple[str, int]]:
+        """Handshake address of every F rank: the rdv port + f."""
         host, _, port = self.rdv_addr.rpartition(":")
         return [(host, int(port) + f) for f in range(self.ffn_ranks)]
 
@@ -105,6 +107,7 @@ class AsapConfig:
 
     @classmethod
     def from_env(cls, environ: Optional[Mapping[str, str]] = None) -> Optional["AsapConfig"]:
+        """The config the launcher exported (export_env); None outside an ASAP deployment."""
         environ = os.environ if environ is None else environ
         if not environ.get(ENV_ROLE):
             return None
@@ -167,6 +170,7 @@ def _reader(view, problems):
 
 
 def _common(get, problems) -> None:
+    """Rules of both roles: one node, no PP, no a2a backend, no EPLB."""
     if get("pp_size") not in (None, 1):
         problems.append(f"pipeline parallelism is not supported (--pp-size 1, got {get('pp_size')})")
     if get("nnodes") not in (None, 1):
@@ -235,6 +239,7 @@ def check_ffn(view, cfg: AsapConfig) -> None:
 # ---- the model, read without torch ----
 @dataclass(frozen=True)
 class MoeShape:
+    """The MoE dimensions both roles size their buffers with."""
     n_experts: int
     hidden: int
     topk: int

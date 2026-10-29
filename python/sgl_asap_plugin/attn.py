@@ -64,6 +64,7 @@ class AttnClient:
     """This rank's AfdChannel, plus tensor views of the result segments it returns."""
 
     def __init__(self, channel, device: int):
+        """Wrap a connected AfdChannel; ``device`` is this rank's GPU ordinal."""
         self.channel, self.device, self.g = channel, device, channel.g
         self._segments = {}  # result address -> [n_max, hidden] bf16 view
 
@@ -94,6 +95,7 @@ class AttnClient:
                           for i in range(0, x.shape[0], m)])
 
     def _segment(self, ptr: int) -> torch.Tensor:
+        """[n_max, hidden] bf16 view of the result segment at ``ptr``, built once."""
         view = self._segments.get(ptr)
         if view is None:
             from sgl_asap_plugin.transport.cuda import DeviceBuffer
@@ -160,6 +162,7 @@ def moe_forward(original, moe, hidden_states, forward_batch=None, gemm_output_ze
 
 
 def remote_experts_of(model) -> List[RemoteExperts]:
+    """Every RemoteExperts of the model, in layer order."""
     return sorted((m for m in model.modules() if isinstance(m, RemoteExperts)), key=lambda m: m.layer_id)
 
 
