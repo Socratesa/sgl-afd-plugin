@@ -1,6 +1,5 @@
 import json
 import os
-import signal
 import subprocess
 import sys
 import unittest
@@ -59,26 +58,6 @@ class TestFfnServe(unittest.TestCase):
         proc = dry_run("--tp-size", "2", "--ep-size", "2")
         self.assertEqual(proc.returncode, 2)
         self.assertIn("num_replicas", proc.stderr)
-
-    def test_worker_lifecycle_ready_line_then_clean_exit_on_sigterm(self):
-        proc = subprocess.Popen(
-            ffn_cmd("--tp-size", "2", "--ep-size", "2", "--asap-num-replicas", "2", "--asap-replica-tp", "1"),
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=child_env())
-        try:
-            seen = []
-            for line in proc.stdout:
-                seen.append(line)
-                if "ffn worker started" in line:
-                    break
-            else:
-                self.fail("worker exited before becoming ready:\n" + "".join(seen)[-2000:])
-            proc.send_signal(signal.SIGTERM)
-            rest = proc.communicate(timeout=30)[0]
-            self.assertEqual(proc.returncode, 0)
-            self.assertIn("ffn worker stopped", rest)
-        finally:
-            if proc.poll() is None:
-                proc.kill()
 
 
 if __name__ == "__main__":

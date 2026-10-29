@@ -9,7 +9,7 @@ from sgl_asap_plugin.errors import AsapConfigError
 class TestAsapConfig(unittest.TestCase):
     def test_defaults(self):
         c = AsapConfig(role="attn")
-        self.assertEqual((c.rdv_addr, c.n_max, c.slots), ("127.0.0.1:29600", 16384, 2))
+        self.assertEqual((c.rdv_addr, c.n_max, c.slots), ("127.0.0.1:9600", 16384, 2))
 
     def test_every_problem_is_reported(self):
         with self.assertRaises(AsapConfigError) as cm:

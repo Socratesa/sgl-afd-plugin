@@ -17,7 +17,8 @@ from sgl_asap_plugin.transport.protocol import MAX_TOKENS
 
 ROLES = ("attn", "ffn")
 ENV_ROLE = "ASAP_ROLE"
-DEFAULT_RDV_ADDR = "127.0.0.1:29600"
+# below 10000: this host hands ports 10000-61000 to outgoing connections, which can take a fixed port first
+DEFAULT_RDV_ADDR = "127.0.0.1:9600"
 DEFAULT_N_MAX = 16384
 DEFAULT_SLOTS = 2
 MAX_N_MAX = MAX_TOKENS  # the transport doorbell's n_tokens field is 17 bits wide
@@ -31,8 +32,9 @@ _CLI_DESTS = {
     "slots": "asap_slots",
     "num_replicas": "asap_num_replicas",
     "replica_tp": "asap_replica_tp",
+    "ffn_ranks": "asap_ffn_ranks",
 }
-_INT_FIELDS = ("n_max", "slots", "num_replicas", "replica_tp")
+_INT_FIELDS = ("n_max", "slots", "num_replicas", "replica_tp", "ffn_ranks")
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,7 @@ class AsapConfig:
     slots: int = DEFAULT_SLOTS  # in-flight micro-batch slots per A rank (dual-batch needs 2)
     num_replicas: Optional[int] = None  # D, the number of A replicas (required by F)
     replica_tp: Optional[int] = None  # T, TP width of one A replica (required by F)
+    ffn_ranks: Optional[int] = None  # E, number of F ranks (required by A; on F it must equal --ep-size)
 
     def __post_init__(self):
         problems = []
@@ -55,11 +58,11 @@ class AsapConfig:
             problems.append(f"n_max must be in [1, {MAX_N_MAX}], got {self.n_max}")
         if not 1 <= self.slots <= MAX_SLOTS:
             problems.append(f"slots must be in [1, {MAX_SLOTS}], got {self.slots}")
-        for name in ("num_replicas", "replica_tp"):
+        for name in ("num_replicas", "replica_tp", "ffn_ranks"):
             value = getattr(self, name)
             if value is not None and value < 1:
                 problems.append(f"{name} must be >= 1, got {value}")
-            if self.role == "ffn" and value is None:
+            if self.role == "ffn" and value is None and name != "ffn_ranks":
                 problems.append(f"{name} is required for the ffn role")
         if problems:
             raise AsapConfigError("[ASAP] invalid config: " + "; ".join(problems))
@@ -124,3 +127,6 @@ def add_cli_args(parser) -> None:
                        help="D, number of A replicas. Required by F; on A it must equal --dp-size.")
     group.add_argument("--asap-replica-tp", type=int, default=None,
                        help="T, TP width of one A replica. Required by F; on A it must equal --tp-size.")
+    group.add_argument("--asap-ffn-ranks", type=int, default=None,
+                       help="E, number of F ranks. Required by A; on F it must equal --ep-size. "
+                            "F rank f listens on the --asap-rdv-addr port + f.")

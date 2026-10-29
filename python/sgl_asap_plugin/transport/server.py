@@ -8,7 +8,7 @@ import threading
 import time
 from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -53,8 +53,9 @@ class Job:
 
 class FfnServer:
     def __init__(self, f_rank: int, geometry: Geometry, *, device: int, run_dir: str, host: str = "127.0.0.1",
-                 port: int = 0, seq_base: int = 0):
-        self.f, self.g, self.seq_base = f_rank, geometry, seq_base
+                 port: int = 0, seq_base: int = 0, info: Optional[dict] = None):
+        """``info`` is what a ``describe`` request returns besides the geometry (what this F serves)."""
+        self.f, self.g, self.seq_base, self.info = f_rank, geometry, seq_base, dict(info or {})
         self.device, self.run_dir, self.host, self._port_req = cu.Device(device), run_dir, host, port
         self.stats: Counter = Counter()
         self.service_order: List[tuple] = []
@@ -79,6 +80,9 @@ class FfnServer:
     # ---- handshake (runs on the handshake thread) ----
     def _on_hello(self, hello: dict) -> dict:
         g = self.g
+        if hello.get("op") == "describe":  # no side effects: A asks what is served before it builds its model
+            return {"ok": True, "f": self.f, "num_f": g.num_f, "proto": PROTO_VERSION, "geometry": g.as_dict(),
+                    **self.info}
         if hello.get("proto") != PROTO_VERSION:
             raise HandshakeError(f"protocol version {hello.get('proto')} != {PROTO_VERSION}")
         theirs, ours = hello.get("geometry", {}), g.as_dict()

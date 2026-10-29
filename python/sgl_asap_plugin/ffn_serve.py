@@ -3,10 +3,10 @@
 It takes the same flags as ``sglang serve`` (``--model-path``, ``--tp-size E --ep-size E``,
 ``--quantization`` ...) plus ``--asap-*``, resolves them through sglang's own pipeline,
 validates the deployment and computes the static layout (expert partition, arena sizes).
-
-M0 scope: validation, layout and process lifecycle. The expert model, the transport and the
-service loop arrive in PR-03/PR-05; the running worker is a placeholder that only proves
-the launch contract (readiness line, SIGTERM -> clean exit).
+Then it starts one worker process per F rank (``ffn/worker.py``): each builds and loads its
+share of the routed experts, listens on ``--asap-rdv-addr`` port + rank, and serves A's messages.
+GPUs are ``--base-gpu-id + rank * --gpu-id-step``; the launcher prints ``[ASAP] ffn ready`` once
+every rank is loaded, warmed up and listening.
 """
 
 from __future__ import annotations
@@ -64,14 +64,79 @@ def plan(ns) -> dict:
     }
 
 
-def serve_forever(summary: dict) -> None:
-    stop = threading.Event()
+def serve(ns, summary: dict) -> int:
+    """Start the F ranks, wait until they are all ready, then supervise them until SIGTERM / SIGINT."""
+    import multiprocessing as mp
+    import os
+    import shutil
+    import tempfile
+    import time
+
+    from sgl_asap_plugin.ffn.worker import worker_main
+
+    ctx = mp.get_context("spawn")
+    ranks = summary["ep_size"]
+    base, step = getattr(ns, "base_gpu_id", 0) or 0, getattr(ns, "gpu_id_step", 1) or 1
+    run_dir = tempfile.mkdtemp(prefix="asap_ffn_", dir="/dev/shm")
+    stop = ctx.Event()
+    quit_requested = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, lambda *_: stop.set())
-    print(f"[ASAP] ffn worker started (M0 placeholder, no transport yet): rdv={summary['asap']['rdv_addr']}",
-          flush=True)
-    stop.wait()
-    print("[ASAP] ffn worker stopped", flush=True)
+        signal.signal(sig, lambda *_: quit_requested.set())
+    workers = []
+    for f in range(ranks):
+        parent, child = ctx.Pipe()
+        proc = ctx.Process(target=worker_main, args=(ns, f, base + f * step, run_dir, child, stop),
+                           name=f"asap-ffn-{f}")
+        proc.start()
+        workers.append((proc, parent))
+    status, ready = 0, {}
+    deadline = time.time() + float(os.environ.get("ASAP_FFN_START_TIMEOUT_S", "3600"))
+    while len(ready) < ranks and not quit_requested.is_set():
+        for f_rank, (proc, conn) in enumerate(workers):
+            try:
+                msg = conn.recv() if conn.poll(0.2) else None
+            except (EOFError, OSError):  # the worker died before it could report
+                print(f"[ASAP] ffn rank {f_rank} exited unexpectedly (exit code {proc.exitcode})", file=sys.stderr,
+                      flush=True)
+                status = 1
+                continue
+            if msg is not None:
+                kind, f, *rest = msg
+                if kind == "ready":
+                    ready[f] = rest
+                    print(f"[ASAP] ffn rank {f} ready: {json.dumps(rest[1], sort_keys=True)}", flush=True)
+                elif kind == "error":
+                    print(f"[ASAP] ffn rank {f} failed:\n{rest[0]}", file=sys.stderr, flush=True)
+                    status = 1
+        if status or time.time() > deadline or any(not p.is_alive() and p.exitcode for p, _ in workers):
+            status = status or 1
+            break
+    if status == 0 and len(ready) == ranks:
+        print(f"[ASAP] ffn ready: ranks={ranks} rdv={summary['asap']['rdv_addr']}+rank "
+              f"experts_per_rank={summary['experts_per_rank']} layers={summary['moe']['layers']}", flush=True)
+        while not quit_requested.is_set():
+            if any(not p.is_alive() for p, _ in workers):
+                print("[ASAP] an ffn rank exited; shutting the service down", file=sys.stderr, flush=True)
+                status = 1
+                break
+            time.sleep(0.5)
+    stop.set()
+    for proc, conn in workers:
+        proc.join(timeout=30)
+        try:
+            while conn.poll():
+                kind, f, *rest = conn.recv()
+                if kind == "stats":
+                    print(f"[ASAP] ffn rank {f} stats {json.dumps(rest[0], sort_keys=True)} "
+                          f"layer_calls={sum(rest[1])}", flush=True)
+        except (EOFError, OSError):
+            pass
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=10)
+    shutil.rmtree(run_dir, ignore_errors=True)
+    print("[ASAP] ffn stopped", flush=True)
+    return status
 
 
 def main(argv=None) -> int:
@@ -83,9 +148,9 @@ def main(argv=None) -> int:
         print(exc, file=sys.stderr)
         return 2
     print("[ASAP] ffn layout " + json.dumps(summary, sort_keys=True), flush=True)
-    if not ns.asap_dry_run:
-        serve_forever(summary)
-    return 0
+    if ns.asap_dry_run:
+        return 0
+    return serve(ns, summary)
 
 
 if __name__ == "__main__":

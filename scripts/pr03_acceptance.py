@@ -91,7 +91,7 @@ def metrics(stdout):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--gpus", default="0,1,2,3", help="ordinals the tests may use (>= 4)")
-    ap.add_argument("--out", default=os.path.join(REPO, "pr03_report"))
+    ap.add_argument("--out", default="/tmp/asap_reports/pr03", help="logs and report (not on the shared volume)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     status, stdout, secs = run_suite(args.gpus, args.out)

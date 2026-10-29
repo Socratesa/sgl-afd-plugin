@@ -1,7 +1,8 @@
 """Per-process ASAP runtime state.
 
-M0 only records the identity of the process (which replica, which rank, how big its
-distributed world is); the A<->F channel is attached here in M1.
+The process records its identity (which replica, which rank, how big its distributed world is).
+In AFD mode (``--asap-ffn-ranks``) the A<->F channel is connected here, right after the
+scheduler has been built and before it serves anything.
 """
 
 from __future__ import annotations
@@ -69,4 +70,20 @@ def init_scheduler_runtime(scheduler) -> AsapRuntime:
     logger.info("[ASAP] scheduler ready: role=%s dp_rank=%s tp_rank=%s tp_size=%s world_size=%s gpu_id=%s "
                 "pid=%d hooks=%d/%d", config.role, r.dp_rank, r.tp_rank, r.tp_size, r.world_size, r.gpu_id,
                 r.pid, patched, len(specs))
+    if config.ffn_ranks is not None:
+        _connect_afd()
+    else:
+        logger.warning("[ASAP] --asap-ffn-ranks is not set: the experts stay local and this server is plain "
+                       "data parallelism, not AFD")
     return _RUNTIME
+
+
+def _connect_afd() -> None:
+    from sglang.srt.model_executor.cuda_graph_config import cuda_graph_fully_disabled
+
+    from sgl_asap_plugin.model.client import get_client
+
+    if not cuda_graph_fully_disabled():
+        raise RuntimeError("[ASAP] the AFD attention role does not support CUDA graphs (the stream waits on the F "
+                           "service cannot be captured): add --disable-cuda-graph")
+    get_client()

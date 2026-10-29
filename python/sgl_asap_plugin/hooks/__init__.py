@@ -5,6 +5,7 @@ the parameters it is expected to have (see ``compat``). Two tiers:
 
 * ``base``: always on, cheap. Adds the ``--asap-*`` flags and watches ``ServerArgs.from_cli_args``.
 * ``role``: only in an ASAP deployment (``--asap-role`` / ``ASAP_ROLE``).
+* ``afd``: the attention role in AFD mode (``--asap-ffn-ranks E``): experts live on the F service.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from sgl_asap_plugin import compat
 
 BASE = "base"
 ROLE = "role"
+AFD = "afd"
 
 
 @dataclass(frozen=True)
@@ -33,9 +35,9 @@ _registered: Dict[str, HookSpec] = {}
 
 
 def all_specs(tier: Optional[str] = None) -> List[HookSpec]:
-    from sgl_asap_plugin.hooks import cli, scheduler, validate
+    from sgl_asap_plugin.hooks import cli, model, scheduler, validate
 
-    specs = [*cli.SPECS, *validate.SPECS, *scheduler.SPECS]
+    specs = [*cli.SPECS, *validate.SPECS, *scheduler.SPECS, *model.SPECS]
     return [s for s in specs if tier is None or s.tier == tier]
 
 

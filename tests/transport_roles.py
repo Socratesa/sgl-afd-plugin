@@ -54,7 +54,8 @@ def f_main(cfg, out_q, go_evt, stop_evt):
         dev, g = cfg["device"], Geometry(**cfg["geometry"])
         torch.cuda.set_device(dev)
         torch.zeros(1, device=f"cuda:{dev}")
-        srv = FfnServer(cfg["f"], g, device=dev, run_dir=cfg["run_dir"], seq_base=cfg.get("seq_base", 0)).start()
+        srv = FfnServer(cfg["f"], g, device=dev, run_dir=cfg["run_dir"], seq_base=cfg.get("seq_base", 0),
+                        port=cfg.get("port", 0), info=cfg.get("info")).start()
         out_q.put(("f_ready", cfg["f"], srv.port))
         go_evt.wait()
         stream, scale, ybuf, jobs = torch.cuda.Stream(dev), cfg["f"] + 1, {}, []

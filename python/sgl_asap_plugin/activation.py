@@ -53,6 +53,8 @@ def _activate_role(config: AsapConfig, *, apply: bool) -> None:
         raise AsapConfigError(f"[ASAP] role {config.role!r} cannot run under sglang serve; "
                               "start the expert service with: python -m sgl_asap_plugin.ffn_serve")
     hooks.register_tier(hooks.ROLE)
+    if config.ffn_ranks is not None:  # AFD mode: experts are remote
+        hooks.register_tier(hooks.AFD)
     if apply:
         from sglang.srt.plugins.hook_registry import HookRegistry
 

@@ -42,11 +42,12 @@ python -m sglang.launch_server --help | grep asap
 | 选项 | 环境变量 | 说明 |
 |---|---|---|
 | `--asap-role {attn,ffn}` | `ASAP_ROLE` | 角色。`attn` 用 `sglang serve`，`ffn` 用 `ffn_serve` |
-| `--asap-rdv-addr HOST:PORT` | `ASAP_RDV_ADDR` | F 的握手地址，默认 `127.0.0.1:29600` |
+| `--asap-rdv-addr HOST:PORT` | `ASAP_RDV_ADDR` | F 的握手地址，默认 `127.0.0.1:9600`（要在 10000 以下：本机把 10000-61000 分给外连的源端口，固定端口会被抢） |
 | `--asap-n-max N` | `ASAP_N_MAX` | 每个 micro-batch 每个 TP 行的最大 token 数，决定 arena 大小，默认 16384 |
 | `--asap-slots S` | `ASAP_SLOTS` | 每个 A rank 的在途 micro-batch 槽位数，默认 2 |
 | `--asap-num-replicas D` | `ASAP_NUM_REPLICAS` | A 副本数。F 必填；A 上必须等于 `--dp-size` |
 | `--asap-replica-tp T` | `ASAP_REPLICA_TP` | 单个 A 副本的 TP。F 必填；A 上必须等于 `--tp-size` |
+| `--asap-ffn-ranks E` | `ASAP_FFN_RANKS` | F 的 rank 数。**给了它，A 才进入 AFD 模式**（专家在 F 上）；不给则专家留在本地，只验证纯 DP 拓扑（M0 的行为）。F 上必须等于 `--ep-size`。F 的第 f 个 rank 监听 `--asap-rdv-addr` 的端口 + f |
 
 启动进程解析配置后导出为 `ASAP_*` 环境变量，子进程（DPC、scheduler）继承。
 
@@ -59,9 +60,13 @@ hook 都声明在 `python/sgl_asap_plugin/hooks/`，每个带目标路径和期�
 | `sglang.srt.server_args.ServerArgs.add_cli_args` | AFTER | base | 增加 `--asap-*` 选项 |
 | `sglang.srt.server_args.ServerArgs.from_cli_args` | BEFORE | base | 解析到 `--asap-role` 时激活 role 层并导出配置，早于 ServerArgs 解析 |
 | `sglang.srt.arg_groups.validation_hook.check_server_args` | BEFORE | role | 纯 DP 规则校验，早于 sglang 自带检查 |
-| `sglang.srt.managers.scheduler.Scheduler.__init__` | AFTER | role | 记录每个 scheduler 进程的 ASAP 身份（M1 在此挂 channel） |
+| `sglang.srt.managers.scheduler.Scheduler.__init__` | AFTER | role | 记录每个 scheduler 进程的 ASAP 身份；AFD 模式下连接 F |
+| `sglang.srt.layers.moe.ep_moe.layer.get_moe_impl_class` | REPLACE | afd | 返回无权重的 `AfdRemoteExperts`，不分配任何专家张量 |
+| `sglang.srt.models.deepseek_v2.DeepseekV2MoE.forward` | AROUND | afd | 持有 `AfdRemoteExperts` 的层改走 AFD 前向：gate 与 top-k 留在 A，专家交给 F |
+| `sglang.srt.model_loader.weight_utils.buffered_multi_thread_safetensors_weights_iterator` | REPLACE | afd | 读 checkpoint 时跳过路由专家张量（约 147 GB 中的绝大部分不读） |
+| `sglang.srt.model_loader.weight_utils.safetensors_weights_iterator` | REPLACE | afd | 同上，单线程路径 |
 
-**激活与失败语义**：base 层每个进程都装，只加选项。role 层只在 ASAP 部署里装：启动进程看解析后的 CLI，子进程看继承的 `ASAP_ROLE`。用户选择启用后，失败一律响亮：入口点里用 `SystemExit`（sglang 的插件加载器只吞 `Exception`），启动进程里直接抛异常。
+**激活与失败语义**：base 层每个进程都装，只加选项。afd 层只在给了 `--asap-ffn-ranks` 的 A 角色里装。role 层只在 ASAP 部署里装：启动进程看解析后的 CLI，子进程看继承的 `ASAP_ROLE`。用户选择启用后，失败一律响亮：入口点里用 `SystemExit`（sglang 的插件加载器只吞 `Exception`），启动进程里直接抛异常。
 
 ## 约束与目录
 

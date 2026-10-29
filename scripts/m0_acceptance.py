@@ -78,7 +78,8 @@ def run_install_checks(rep):
 
 
 def expected_hook_count():
-    code = "from sgl_asap_plugin import hooks; print(len(hooks.all_specs()))"
+    code = ("from sgl_asap_plugin import hooks; "
+            "print(len(hooks.all_specs(hooks.BASE)) + len(hooks.all_specs(hooks.ROLE)))")
     out = subprocess.run([sys.executable, "-W", "ignore", "-c", code], capture_output=True, text=True)
     return int(out.stdout.split()[-1])
 
@@ -89,7 +90,7 @@ def main():
     ap.add_argument("--gpus", default="0,1", help="GPUs for the A server (D=2, T=1)")
     ap.add_argument("--control-gpus", default="2,3", help="GPUs for the attention-DP control (tp=2)")
     ap.add_argument("--port", type=int, default=31000)
-    ap.add_argument("--out", default=os.path.join(REPO, "m0_report"))
+    ap.add_argument("--out", default="/tmp/asap_reports/m0", help="logs and report (not on the shared volume)")
     ap.add_argument("--startup-timeout", type=int, default=900)
     ap.add_argument("--skip-unit", action="store_true")
     ap.add_argument("--skip-gpu", action="store_true")

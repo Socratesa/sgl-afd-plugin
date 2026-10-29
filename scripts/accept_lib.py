@@ -25,12 +25,18 @@ READY_RE = re.compile(
 ARGS_OK_RE = re.compile(r"\[ASAP\] server args ok: role=(\w+) hooks=(\d+)/(\d+)")
 
 
-def server_env(gpus: str) -> dict:
+def server_env(gpus: str, real_weights: bool = False) -> dict:
+    """Environment of a server. The M0 runs use dummy weights and pretend the experts are FP8;
+    real checkpoints keep the layout detected from the files."""
     env = dict(os.environ)
     env.pop("ASAP_ROLE", None)
     env.pop("NCCL_DEBUG_FILE", None)
     env.update({"CUDA_VISIBLE_DEVICES": gpus, "SGLANG_PLUGINS": "sgl_asap_plugin", "NCCL_DEBUG": "WARN",
-                "SGLANG_DSV4_FP4_EXPERTS": "0", "SGLANG_JIT_DEEPGEMM_PRECOMPILE": "0"})
+                "SGLANG_JIT_DEEPGEMM_PRECOMPILE": "0"})
+    if real_weights:
+        env.pop("SGLANG_DSV4_FP4_EXPERTS", None)
+    else:
+        env["SGLANG_DSV4_FP4_EXPERTS"] = "0"
     return env
 
 
@@ -101,6 +107,33 @@ class Server:
             if not any(_alive(p) for p in self._family):
                 break
         self._log.close()
+
+
+class LogServer(Server):
+    """A background service that is ready when a line matching ``ready_re`` shows up in its log."""
+
+    def __init__(self, name, argv, env, log_dir, ready_re):
+        super().__init__(name, argv, env, log_dir, port=None)
+        self.ready_re = re.compile(ready_re)
+
+    def wait_ready(self, timeout):
+        deadline = time.time() + timeout
+        while time.time() < deadline and self.proc.poll() is None:
+            if self.ready_re.search(self.log_text()):
+                return True
+            time.sleep(1)
+        return False
+
+    def stop(self):
+        """Ask the service to finish (SIGTERM to its main process only: it stops its own workers and
+        prints their statistics), then fall back to the hard stop of ``Server``."""
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.send_signal(signal.SIGTERM)
+            try:
+                self.proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                pass
+        super().stop()
 
 
 def generate(port, rank=None, timeout=60.0, text="The capital of France is"):

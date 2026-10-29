@@ -199,3 +199,92 @@ def parked_wait_delays_cold_work_only(ch, torch, g, cfg, out_q, go_evt):
 
     cold, warm = timed(), timed()
     return {"delay_s": delay, "cold_s": cold, "warm_s": warm}
+
+
+def afd_forward(ch, torch, g, cfg, out_q, go_evt):
+    """The A-side MoE forward (model/afd_forward.py) against loopback F ranks, with fake gate/top-k/shared modules."""
+    from types import SimpleNamespace
+
+    from sgl_asap_plugin.model import afd_forward as af
+    from sgl_asap_plugin.model import client as cl
+    from sgl_asap_plugin.model import remote_experts as rx
+
+    R, dev, a = _roles(), cfg["device"], cfg["a"]
+    client = cl.AttnClient.__new__(cl.AttnClient)  # wrap the channel the harness already connected
+    client.cfg, client.a, client.device, client.geometry, client.channel, client._views = None, a, dev, g, ch, {}
+    cl.set_client(client)
+    rx.set_description({"quant_method": "Mxfp4FlashinferCutlassMoEMethod", "fuse_routed_scaling_in_topk": cfg["fused"]})
+    out, scale = {}, 1.5
+    for name, n, valid, is_hash, skip_shared in cfg["cases"]:
+        x, ids, w = R.pattern(torch, g, a, len(out) + 1, n, dev)
+        layer = 3 + len(out)
+        moe = SimpleNamespace(
+            layer_id=layer, is_hash=is_hash, routed_scaling_factor=scale, reduce_results=True, _shared_expert_tp1=False,
+            experts=rx.AfdRemoteExperts(256, 0, g.topk, g.hidden, 2048, layer),
+            gate=lambda h, alloc: h, _adds_replicated_output=lambda: True,
+            topk=lambda h, logits, num_token_non_padded=None, expert_location_dispatch_info=None, input_ids=None:
+            SimpleNamespace(topk_ids=ids, topk_weights=w),
+            _forward_shared_experts=lambda h, alloc: h * 0.25 + 1)
+        batch = SimpleNamespace(moe_num_token_non_padded=lambda: None if valid == n else torch.tensor(valid, device=f"cuda:{dev}"))
+        before = ch._seq[0]
+        y = af.remote_moe_forward(moe, x, batch, None, torch.arange(n, device=f"cuda:{dev}") if is_hash else None,
+                                  skip_shared)
+        torch.cuda.synchronize(dev)
+        ch.check()
+        routed = R.expected(torch, g, x[:valid], ids[:valid], w[:valid], layer).to(torch.bfloat16)
+        routed = torch.cat([routed, routed.new_zeros((n - valid, g.hidden))])
+        alpha = 1.0 if cfg["fused"] else scale
+        if skip_shared:
+            want = routed if cfg["fused"] else routed * scale
+        else:
+            want = (x * 0.25 + 1).add(routed, alpha=alpha)
+        out[name] = {"shape_ok": tuple(y.shape) == (n, g.hidden), "equal": bool(torch.equal(y, want)),
+                     "messages": ch._seq[0] - before}
+    return out
+
+
+def ffn_numerics(ch, torch, g, cfg, out_q, go_evt):
+    """A synthetic A rank against the real F service: random layers in random order, checked against a torch
+    reference of the routed experts restricted to a pool of experts that spans every F rank."""
+    import ffn_reference as ref
+
+    dev, a, rng = cfg["device"], cfg["a"], random.Random(cfg["seed"])
+    pool, layers, device = cfg["pool"], cfg["layers"], f"cuda:{cfg['device']}"
+    refs = ref.load_reference(cfg["model_dir"], pool, layers, device)
+    R = _roles()
+    stream = torch.cuda.Stream(dev)
+    s, bufs = stream.cuda_stream, _buffers(torch, g, dev)
+    gen = torch.Generator(device=device).manual_seed(cfg["seed"])
+    worst, order, sizes, bad = 0.0, [], [], []
+    for r in range(cfg["rounds"]):
+        layer, n, slot = rng.randrange(layers), rng.choice(cfg["sizes"]), r % g.slots
+        order.append(layer)
+        sizes.append(n)
+        xb, ib, wb = bufs[slot]
+        with torch.cuda.stream(stream):  # everything on one stream: generation, send, reply, reference
+            pool_t = torch.tensor(pool, device=device)
+            pick = torch.rand(n, len(pool), device=device, generator=gen).topk(g.topk, dim=1).indices
+            ids = pool_t[pick].to(torch.int32)
+            w = torch.rand(n, g.topk, device=device, generator=gen, dtype=torch.float32) + 0.1
+            x = (torch.randn(n, g.hidden, device=device, generator=gen) * 0.5).to(torch.bfloat16)
+            xb[:n].copy_(x)
+            ib[:n].copy_(ids)
+            wb[:n].copy_(w)
+            ticket = ch.send(layer, slot, xb.data_ptr(), ib.data_ptr(), wb.data_ptr(), n, s)
+            ptrs = ch.wait_combine(ticket, s)
+            got = sum(R.tview(torch, p, n * g.hidden, torch.bfloat16, (n, g.hidden), dev).float() for p in ptrs)
+            want = ref.reference_moe(refs, layer, x, ids, w)
+            err = float((got - want).norm() / want.norm())
+            if err > 2e-2 and cfg.get("ranges"):  # which F rank is off?
+                per_rank = [float((R.tview(torch, p, n * g.hidden, torch.bfloat16, (n, g.hidden), dev).float()
+                                   - ref.reference_moe(refs, layer, x, ids, w, lo=lo, hi=hi)).norm()
+                                  / ref.reference_moe(refs, layer, x, ids, w, lo=lo, hi=hi).norm().clamp(min=1e-6))
+                            for p, (lo, hi) in zip(ptrs, cfg["ranges"])]
+                bad.append({"round": r, "layer": layer, "n": n, "err": err, "per_rank": per_rank})
+            worst = max(worst, err)
+        stream.synchronize()
+        ch.check()
+        if cfg.get("think_us"):
+            time.sleep(rng.uniform(0, cfg["think_us"]) / 1e6)
+    return {"rounds": cfg["rounds"], "worst_rel_err": worst, "layers_visited": sorted(set(order)),
+            "layer_order_head": order[:12], "sizes": sorted(set(sizes)), "bad": bad[:6]}

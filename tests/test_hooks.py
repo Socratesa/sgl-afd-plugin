@@ -5,6 +5,10 @@ from _util import HAS_MODEL, MODEL_DIR, TINY_OVERRIDE, last_json, run_python
 BASE_TARGETS = ["sglang.srt.server_args.ServerArgs.add_cli_args", "sglang.srt.server_args.ServerArgs.from_cli_args"]
 ROLE_TARGETS = ["sglang.srt.arg_groups.validation_hook.check_server_args",
                 "sglang.srt.managers.scheduler.Scheduler.__init__"]
+AFD_TARGETS = ["sglang.srt.layers.moe.ep_moe.layer.get_moe_impl_class",
+               "sglang.srt.model_loader.weight_utils.buffered_multi_thread_safetensors_weights_iterator",
+               "sglang.srt.model_loader.weight_utils.safetensors_weights_iterator",
+               "sglang.srt.models.deepseek_v2.DeepseekV2MoE.forward"]
 
 PATCH_SNIPPET = """
 import json, argparse
@@ -23,7 +27,7 @@ class TestPreflight(unittest.TestCase):
         from sgl_asap_plugin import compat, hooks
 
         specs = hooks.all_specs()
-        self.assertEqual(sorted(s.target for s in specs), sorted(BASE_TARGETS + ROLE_TARGETS))
+        self.assertEqual(sorted(s.target for s in specs), sorted(BASE_TARGETS + ROLE_TARGETS + AFD_TARGETS))
         compat.preflight(specs)
 
     def test_preflight_names_every_broken_target(self):
@@ -57,6 +61,11 @@ class TestActivationInFreshProcess(unittest.TestCase):
         r = run_python(PATCH_SNIPPET, {"ASAP_ROLE": "attn"})
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         self.assertEqual(last_json(r.stdout)["patched"], sorted(BASE_TARGETS + ROLE_TARGETS))
+
+    def test_ffn_ranks_adds_the_afd_tier(self):
+        r = run_python(PATCH_SNIPPET, {"ASAP_ROLE": "attn", "ASAP_FFN_RANKS": "2"})
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        self.assertEqual(last_json(r.stdout)["patched"], sorted(BASE_TARGETS + ROLE_TARGETS + AFD_TARGETS))
 
     def test_ffn_role_cannot_run_under_sglang_serve(self):
         r = run_python(PATCH_SNIPPET, {"ASAP_ROLE": "ffn", "ASAP_NUM_REPLICAS": "2", "ASAP_REPLICA_TP": "1"})
