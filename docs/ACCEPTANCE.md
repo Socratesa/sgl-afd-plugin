@@ -1,6 +1,34 @@
 # 验收标准与结果
 
-一条命令一个阶段：`python scripts/acceptance.py <stage>`。测试自己断言门限，脚本把测试映射到验收 ID、补上实测数字，任何跳过都算失败。日志和 `report.md` 默认写到 `/tmp/asap_reports/<stage>`（共享盘写满过一次，PR-04 草稿的验收就是因此失败的）。
+一条命令一个阶段：`python scripts/acceptance.py <stage>`。测试自己断言门限，脚本把测试映射到验收 ID、补上实测数字。日志和 `report.md` 默认写到 `/tmp/asap_reports/<stage>`。每轮显式指定新的 `--out`，避免覆盖旧记录。
+
+## 验收框架与迁移
+
+验收框架更新涉及验收工具与测试监督，模型执行、CUDA 协议与性能门限保持原值。下面各阶段的 GPU 数字为历史记录，不能作为更新后的 GPU 验收结果。
+
+| 模块 | 职责 |
+|---|---|
+| `scripts/acceptance.py` | 参数与拓扑检查、服务编排、响应采集、阶段门禁 |
+| `scripts/acceptance_metrics.py` | 纯数据完整性与数值比较；无服务依赖 |
+| `scripts/acceptance_report.py` | 必选 ID、唯一性、PASS / FAIL / PARTIAL 和落盘 |
+| `scripts/acceptance_runner.py` | 完整 unittest ID、结构化结果、退出码与自有进程监督 |
+| `scripts/acceptance_load.py` | 请求成功、有限耗时、背景线程结束、每条短请求的时间重叠 |
+
+完整 PASS 的退出码为 **0**；失败为 **1**；显式跳过或仅跑参考形成 **PARTIAL，退出码 2**。必选测试的意外 skip 仍为 FAIL。`report.json` 保留原来的行数组格式，新增 `summary.json`（schema 1）供自动化读取总结果与必选清单。缺项、异常和重复 ID 都不能通过；异常详情写入 `exception.log`。命令行无法解析或输出路径不可写时仍按正常 CLI/文件系统错误退出。
+
+每个测试子进程有 `--test-timeout`（默认 3600 秒），保留原始日志及 `.result.json` sidecar。完整 ID 不再从终端输出正则推断。接受数据前核对计划、开始和完成的测试集合；fixture 错误、subTest 错误、异常退出、超时和未完成的结果均失败。运行器要求 POSIX `waitid(WNOWAIT)`，保留 leader PID 到自有进程组清理完毕，再回收 leader；Darwin 遇到空僵尸进程组的 EPERM 时使用 `/bin/ps` 只读确认无活成员，确认失败则报错。该平台能力在创建测试子进程前检查。
+
+运行器设置内部测试环境标志 `ASAP_TEST_SUPERVISED=1`；测试 helper `FfnService` 在该模式下留在测试进程组，停止超时记录错误，由外部运行器完成清理。直接使用 unittest 时保持独立服务会话。这个标志仅属于测试监督，不是部署 CLI 或 A/F 通信协议。新增测试内子服务同样不得自行脱离所属进程组。
+
+`--replicas 2,1` 会先跑单副本；多副本必须显式包含 `1`，只使用本轮内存中的单副本结果。副本数超过 A GPU 数、重复副本数、A/F GPU 重叠等在启动前拒绝。`--replicas ''` 仍可只收集参考，但不能宣称完整 e2e PASS。
+
+新采集的响应保存 token ID 输入哈希和对应的 prompt 位置。旧 `reference*.json` 缺少这些字段，不能用于正式门禁，需要重新采集。响应必须包含完整 top-5、完整请求数及预期输入后缀；严格一致门禁检查全部 top-k 成员。跨部署 top-k 成员变化单独计数，原有噪声底阈值保持不变。输入 logprob 契约为请求后缀加一个前导 `None`，该位置不参与数值比较；默认 64 条输入对应 15613 个有效位置。若上游响应契约变化，采集将明确失败，需要重新核验适配。
+
+背景负载比较使用同一个单调时钟记录区间与耗时。所有请求必须成功，每条 loaded 短请求必须与至少一条成功长请求有正时间重叠；线程未结束或异常退出均失败。只计算实际重叠的长请求中位数，保持短请求 p50 比值 ≤ 1.5、loaded p50 < 长请求 p50 的 0.5 倍。`M*.3` 证明 HTTP 请求在途重叠；GPU 执行交错仍由 `M*.4` 的各 F rank trace 支持。
+
+CPU 回归命令见 [README](../README.md)。本次验收框架更新已通过 CPU 回归，尚未重新执行真实 GPU 验收。完整缓存身份（模型 revision、tokenizer、上游/backend、生成参数等）、唯一运行目录和测试 GPU/模型参数转发仍待完善；输入哈希不能替代完整的实验身份。
+
+## 历史 GPU 环境
 
 环境（2026-10-30）：8× Hopper 80 GB（NVLink NV18），driver 580.126.20，torch 2.14.1+cu130，sglang 0.5.22（`baa9befa38`），DeepSeek-V4-Flash-0731（43 层，256 专家 top-6，MXFP4 专家，166.9 GB）。venv `lhd/sgl_afd/.venv`（基于 conda 环境 `sgl_afd` 的 Python 3.12）。
 

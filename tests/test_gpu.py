@@ -239,6 +239,7 @@ class FfnService:
                      str(base_gpu), "--json-model-override-args", json.dumps({"num_hidden_layers": layers})]
         self.log_path = tempfile.mktemp(prefix="asap_ffn_test_", suffix=".log", dir="/tmp")
         self.proc = None
+        self.supervised = os.environ.get("ASAP_TEST_SUPERVISED") == "1"
 
     def start(self, timeout=1200):
         # the venv's ninja first, as after `source activate` (see scripts/servers.py: server_env)
@@ -247,7 +248,7 @@ class FfnService:
             env.pop(k, None)
         self.log = open(self.log_path, "w")
         self.proc = subprocess.Popen(self.argv, env=env, stdout=self.log, stderr=subprocess.STDOUT,
-                                     start_new_session=True)
+                                     start_new_session=not self.supervised)
         deadline = time.time() + timeout
         while time.time() < deadline and self.proc.poll() is None:
             if self.READY.search(self.text()):
@@ -262,16 +263,24 @@ class FfnService:
     def reports(self, kind):
         return {int(m.group(1)): json.loads(m.group(3)) for m in self.RANK.finditer(self.text()) if m.group(2) == kind}
 
-    def stop(self):
-        if self.proc is not None and self.proc.poll() is None:
-            self.proc.send_signal(signal.SIGTERM)
-            try:
-                self.proc.wait(timeout=90)
-            except subprocess.TimeoutExpired:
-                os.killpg(self.proc.pid, signal.SIGKILL)
-                self.proc.wait()
-        self.log.close()
-        return self.proc.returncode
+    def stop(self, timeout=90):
+        try:
+            if self.proc is not None and self.proc.poll() is None:
+                self.proc.send_signal(signal.SIGTERM)
+                try:
+                    self.proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired as exc:
+                    if self.supervised:
+                        # This service shares the suite's group: the runner owns
+                        # final cleanup. Report failure rather than killing tests
+                        # before their structured outcome can be saved.
+                        raise RuntimeError(f"F service stop exceeded {timeout:g}s under suite supervision") from exc
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                    self.proc.wait()
+            return self.proc.returncode
+        finally:
+            if hasattr(self, "log"):
+                self.log.close()
 
 
 @unittest.skipUnless(HAVE_GPUS and HAS_MODEL, "needs GPUs and the DeepSeek-V4-Flash checkpoint")

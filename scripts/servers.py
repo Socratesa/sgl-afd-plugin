@@ -6,6 +6,7 @@ launcher plus the descendants seen while it ran), never anything else on the mac
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
@@ -16,7 +17,18 @@ import time
 import urllib.error
 import urllib.request
 
-import psutil
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import psutil
+
+
+def _process_tools():
+    """Keep acceptance analysis importable without the GPU environment's dependencies."""
+    try:
+        return importlib.import_module("psutil")
+    except ImportError as exc:
+        raise RuntimeError("Starting acceptance servers requires psutil in the SGLang environment") from exc
 
 MODEL = "/root/paddlejob/workspace/lhd_models/DeepSeek-V4-Flash-0731"
 TINY_OVERRIDE = '{"num_hidden_layers": 4, "n_routed_experts": 128, "num_hash_layers": 0}'
@@ -41,6 +53,7 @@ def server_env(gpus: str, **extra) -> dict:
 
 
 def _alive(p: psutil.Process) -> bool:
+    psutil = _process_tools()
     try:
         return p.is_running() and p.status() != psutil.STATUS_ZOMBIE
     except psutil.NoSuchProcess:
@@ -56,6 +69,7 @@ class Server:
         self.proc, self._family, self._log = None, [], None
 
     def start(self):
+        _process_tools()  # Validate cleanup support before creating any process.
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
         self._log = open(self.log_path, "w")
         self.proc = subprocess.Popen(self.argv, env=self.env, stdout=self._log, stderr=subprocess.STDOUT,
@@ -85,6 +99,7 @@ class Server:
         return [m.groupdict() for m in ATTN_READY_RE.finditer(self.log_text())]
 
     def descendants(self):
+        psutil = _process_tools()
         root = psutil.Process(self.proc.pid)
         self._family = [root] + root.children(recursive=True)
         return self._family[1:]
@@ -92,6 +107,7 @@ class Server:
     def stop(self):
         if self.proc is None:
             return
+        psutil = _process_tools()
         try:
             self.descendants()
         except psutil.NoSuchProcess:

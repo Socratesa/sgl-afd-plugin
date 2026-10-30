@@ -15,6 +15,14 @@ SGLang 插件：prefill 阶段的 ASAP 式 Attention-FFN 分离（AFD）。
 
 设计与路线图：`afd_dev/roadmap/sgl_codewalk/`（`02a`–`02d`、`03`、`03b`）。本分支 `asap` 是孤儿分支，与 `master`（attn-DP + DeepEP 的锁步方案）无共同代码。
 
+验收框架包含数据比较、必选项报告、测试子进程监督和负载有效性评估；说明及兼容变化见 [验收文档](docs/ACCEPTANCE.md)。无 CUDA 环境可从仓库根目录运行：
+
+```bash
+python -B -m unittest discover -s tests -p 'test_acceptance_*.py' -v
+```
+
+这组测试验证验收工具本身；模型精度、CUDA IPC 和服务部署仍需独立 GPU 验收。
+
 ## 代码
 
 | 文件 | 内容 |

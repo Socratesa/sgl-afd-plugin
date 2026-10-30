@@ -7,101 +7,96 @@
     python scripts/acceptance.py pr05 --gpus 0,1,2,3                  # F service vs a torch reference
     python scripts/acceptance.py e2e  --a-gpus 0,1 --f-gpus 4,5,6,7   # full model: PR-04/05 bring-up, PR-06, PR-07
 
-Tests assert their own gates; this script maps them to acceptance IDs, adds the measured numbers and fails on
-any skipped test. Logs and reports go to --out (default /tmp/asap_reports/<stage>): the shared volume can be full.
+Tests assert their own gates; this script checks complete stage coverage and structured suite results.
+Exit codes: PASS=0, FAIL=1, PARTIAL=2. Logs and reports go to --out (default /tmp/asap_reports/<stage>).
 """
 
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
+import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import re
 import signal
 import subprocess
 import sys
 import time
+import traceback
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "scripts"))
 import servers as sv  # noqa: E402
+from acceptance_load import RequestSample, assess_load  # noqa: E402
+from acceptance_metrics import compare  # noqa: E402
+from acceptance_report import Report  # noqa: E402
+from acceptance_runner import SuiteResult, run_suite  # noqa: E402
 
 
-class Report:
-    def __init__(self, out):
-        self.out, self.rows = out, []
-
-    def add(self, cid, title, measured, criterion, ok):
-        status = "PASS" if ok is True else "SKIP" if ok is None else "FAIL"
-        self.rows.append({"id": cid, "title": title, "measured": str(measured), "criterion": criterion,
-                          "status": status})
-        print(f"[{status}] {cid} {title}: {measured}   (criterion: {criterion})", flush=True)
-
-    def ok(self):
-        return all(r["status"] == "PASS" for r in self.rows)
-
-    def save(self):
-        with open(os.path.join(self.out, "report.json"), "w") as f:
-            json.dump(self.rows, f, indent=2, ensure_ascii=False)
-        lines = ["| ID | Check | Measured | Criterion | Result |", "|---|---|---|---|---|"]
-        lines += [f"| {r['id']} | {r['title']} | {r['measured']} | {r['criterion']} | {r['status']} |"
-                  for r in self.rows]
-        with open(os.path.join(self.out, "report.md"), "w") as f:
-            f.write("\n".join(lines) + "\n")
-
-
-def run_tests(names, out, log_name, gpus=None):
-    """unittest ``names`` (module.Class[.test]) in tests/ -> ({test: status}, stdout, seconds)."""
+def run_tests(names: list[str], out: str, log_name: str, gpus: str | None = None,
+              timeout_s: float = 3600) -> SuiteResult:
+    """Preserve complete unittest outcomes, child exit status and a bounded deadline."""
     env = dict(os.environ, PYTHONPATH=os.pathsep.join([os.path.join(REPO, "python"), os.path.join(REPO, "tests")]),
                PYTHONDONTWRITEBYTECODE="1")
     env.pop("ASAP_ROLE", None)
     if gpus:
         env["ASAP_TEST_GPUS"] = gpus
-    start = time.time()
-    p = subprocess.run([sys.executable, "-W", "ignore", "-m", "unittest", *names, "-v"], cwd=os.path.join(REPO, "tests"),
-                       env=env, capture_output=True, text=True)
-    with open(os.path.join(out, log_name), "w") as f:
-        f.write(p.stderr + "\n--- stdout ---\n" + p.stdout)
-    status = {m.group(1): m.group(2) for m in re.finditer(r"^(test_\w+) \(\S+\) \.\.\. (.*)$", p.stderr, re.M)}
-    for m in re.finditer(r"^(test_\w+) \(\S+\) \.\.\. $\n(?:.*\n)*?^(ok|FAIL|ERROR)$", p.stderr, re.M):
-        status.setdefault(m.group(1), m.group(2))  # a test that printed before its verdict
-    return status, p.stdout, time.time() - start
+    return run_suite(names, cwd=os.path.join(REPO, "tests"), env=env,
+                     log_path=os.path.join(out, log_name), timeout_s=timeout_s)
 
 
-def add_mapped(rep, checks, status, measured=None, min_tests=None, secs=0.0):
+def add_mapped(rep, checks, suite: SuiteResult, measured=None, min_tests=None):
     """One row per (id, title, tests, criterion); then one row that every test ran, none skipped, all mapped."""
     measured = measured or {}
+    status = suite.statuses
+    resolved = set()
     for cid, title, tests, criterion in checks:
-        results = [status.get(t, "not run") for t in tests]
+        results = []
+        for name in tests:
+            matches = [test_id for test_id in status if test_id == name or test_id.endswith("." + name)]
+            if len(matches) == 1:
+                resolved.add(matches[0])
+                results.append(status[matches[0]])
+            else:
+                results.append("not run" if not matches else f"ambiguous test name: {matches}")
         ok = all(r == "ok" for r in results)
         text = measured.get(cid) or (f"{len(tests)} test(s) ok" if ok else
                                      ", ".join(f"{t}: {r}" for t, r in zip(tests, results) if r != "ok"))
         rep.add(cid, title, text, criterion, ok)
     if min_tests is not None:
-        mapped = {t for _, _, tests, _ in checks for t in tests}
-        extra, skipped = sorted(set(status) - mapped), [t for t, s in status.items() if s.startswith("skipped")]
-        rep.add("U", "suite size and mapping", f"{len(status)} tests in {secs:.0f}s, unmapped {extra or 'none'}, "
-                f"skipped {skipped or 'none'}", f">= {min_tests} tests, each mapped to an ID, 0 skipped",
-                len(status) >= min_tests and not extra and not skipped)
+        extra = sorted(set(status) - resolved)
+        rep.add("U", "suite completion and mapping",
+                f"{len(status)} outcomes in {suite.elapsed_s:.0f}s, exit {suite.returncode}, "
+                f"unmapped {extra or 'none'}, problems {suite.problems}",
+                f">= {min_tests} tests, each uniquely mapped, all pass, exit 0",
+                suite.ok and len(status) >= min_tests and not extra)
 
 
 # ---- M0: plugin skeleton, deployment rules, plain-DP topology ----
 def stage_m0(rep, args):
-    status, _, secs = run_tests(["test_cpu"], args.out, "unit_tests.log")
+    suite = run_tests(["test_cpu"], args.out, "unit_tests.log", timeout_s=args.test_timeout)
+    status, secs = suite.statuses, suite.elapsed_s
     failed = [t for t, s in status.items() if s != "ok"]
     rep.add("U1", "CPU tests (config, rules, layout, checkpoint selection, hook activation in fresh processes)",
             f"{len(status)} run, {len(failed)} not ok {failed or ''}, {secs:.0f}s", ">= 28 run, all ok, 0 skipped",
-            len(status) >= 28 and not failed)
+            suite.ok and len(status) >= 28 and not failed)
     found = [ep.value for ep in importlib.metadata.entry_points(group="sglang.srt.plugins") if ep.name == "sgl_asap_plugin"]
     rep.add("U2", "entry point discoverable by sglang", found or "missing", "sgl_asap_plugin:register",
             found == ["sgl_asap_plugin:register"])
     code = ("import sys,time; t=time.perf_counter(); import sgl_asap_plugin; "
             "print(time.perf_counter()-t, 'torch' in sys.modules, 'sglang' in sys.modules)")
-    dt, torch_in, sglang_in = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True).stdout.split()
+    child = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=args.test_timeout)
+    if child.returncode != 0:
+        raise RuntimeError(f"package import probe exited {child.returncode}: {child.stderr[:1000]}")
+    dt, torch_in, sglang_in = child.stdout.split()
     rep.add("U3", "importing the package stays cheap", f"{float(dt) * 1000:.0f} ms, torch={torch_in}, sglang={sglang_in}",
             "< 500 ms, torch=False, sglang=False", float(dt) < 0.5 and torch_in == sglang_in == "False")
     if args.skip_gpu:
+        for cid in ("G0", "G1", "G2", "G3", "G4", "N1"):
+            rep.add(cid, "GPU check excluded", "--skip-gpu", "required for full m0 acceptance", None)
         return
     hooks = len([s for s in __import__("sgl_asap_plugin.hooks", fromlist=["SPECS"]).SPECS if s.tier in ("base", "role")])
     tiny = ("--load-format", "dummy", "--json-model-override-args", sv.TINY_OVERRIDE, "--mem-fraction-static", "0.55",
@@ -145,6 +140,7 @@ def stage_m0(rep, args):
     finally:
         srv.stop()
     if args.skip_control:
+        rep.add("N1", "control excluded", "--skip-control", "required for full m0 acceptance", None)
         return
     port = args.port + 100  # control: stock attention DP is lock-stepped, so the same experiment must fail there
     argv = sv.launch_server_argv(args.model, port, "--tp-size", 2, "--dp-size", 2, "--enable-dp-attention", *tiny)
@@ -153,7 +149,7 @@ def stage_m0(rep, args):
     srv, _, ready = sv.start_server(make, args.startup_timeout)
     try:
         if not ready:
-            rep.add("N1", "control: stock attention-DP", f"did not start, see {srv.log_path}", "neither rank replies", None)
+            rep.add("N1", "control: stock attention-DP", f"did not start, see {srv.log_path}", "control must start", False)
             return
         procs = [p for p in srv.descendants() if "sglang::scheduler" in " ".join(p.cmdline())]
         before = [sv.generate(port, rank=r, timeout=60)[0] for r in (0, 1)]
@@ -223,8 +219,8 @@ def pr03_metrics(stdout):
 def stage_pr03(rep, args):
     names = ["test_cpu.TestLayout", "test_gpu.TestPingPong", "test_gpu.TestBackpressure", "test_gpu.TestFaults",
              "test_gpu.TestPerf"]
-    status, stdout, secs = run_tests(names, args.out, "transport_tests.log", args.gpus)
-    add_mapped(rep, PR03_CHECKS, status, pr03_metrics(stdout), min_tests=20, secs=secs)
+    suite = run_tests(names, args.out, "transport_tests.log", args.gpus, args.test_timeout)
+    add_mapped(rep, PR03_CHECKS, suite, pr03_metrics(suite.stdout), min_tests=20)
 
 
 # ---- PR-04 (unit part): the A-side MoE forward against synthetic F ranks ----
@@ -236,8 +232,8 @@ PR04_CHECKS = [
 
 
 def stage_pr04(rep, args):
-    status, _, secs = run_tests(["test_gpu.TestAttnForward"], args.out, "attn_tests.log", args.gpus)
-    add_mapped(rep, PR04_CHECKS, status, min_tests=2, secs=secs)
+    suite = run_tests(["test_gpu.TestAttnForward"], args.out, "attn_tests.log", args.gpus, args.test_timeout)
+    add_mapped(rep, PR04_CHECKS, suite, min_tests=2)
 
 
 # ---- PR-05 (service part): the F service against a torch reference of the experts ----
@@ -253,11 +249,11 @@ PR05_CHECKS = [
 
 
 def stage_pr05(rep, args):
-    status, stdout, secs = run_tests(["test_gpu.TestFfnService"], args.out, "ffn_tests.log", args.gpus)
+    suite = run_tests(["test_gpu.TestFfnService"], args.out, "ffn_tests.log", args.gpus, args.test_timeout)
     m = re.search(r"worst relative error vs the torch reference per A client: (\[.*?\]); layers in arrival order (\[.*?\])",
-                  stdout)
+                  suite.stdout)
     measured = {"S2": f"worst rel err {m.group(1)}, arrival order {m.group(2)}"} if m else {}
-    add_mapped(rep, PR05_CHECKS, status, measured, min_tests=3, secs=secs)
+    add_mapped(rep, PR05_CHECKS, suite, measured, min_tests=3)
 
 
 # ---- e2e: the full model. PR-04/05 bring-up and PR-06 alignment with 1 replica, PR-07 with D replicas ----
@@ -289,7 +285,11 @@ def build_prompts(model, count, lo, hi, out):
     return prompts
 
 
-def collect(port, prompts, tail=256, rank=None):
+def input_id(ids: list[int]) -> str:
+    return hashlib.sha256(json.dumps(ids, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def collect(port: int, prompts: list[list[int]], tail: int = 256, rank: int | None = None) -> list[dict]:
     """Greedy first token with its top-5 logprobs, plus the logprobs of the last ``tail`` prompt tokens."""
     rows = []
     for ids in prompts:
@@ -298,28 +298,51 @@ def collect(port, prompts, tail=256, rank=None):
         if not ok:
             rows.append({"error": str(out)[:300]})
             continue
-        meta = out["meta_info"]
-        rows.append({"token": meta["output_token_logprobs"][0][1], "top": [t[:2] for t in meta["output_top_logprobs"][0]],
-                     "prompt_lp": [t[0] for t in meta["input_token_logprobs"] if t[0] is not None], "secs": secs})
+        try:
+            meta = out["meta_info"]
+            raw = meta["input_token_logprobs"]
+            # SGLang returns the requested input suffix, with its first unscored
+            # token represented by None. Reject truncation before discarding it.
+            if len(raw) != len(ids) - body_tail or [entry[1] for entry in raw] != ids[body_tail:]:
+                raise ValueError("input logprobs do not cover the requested token suffix")
+            if raw[0][0] is not None or any(entry[0] is None for entry in raw[1:]):
+                raise ValueError("expected exactly one leading unscored input token")
+            if len(meta["output_token_logprobs"]) != 1 or len(meta["output_top_logprobs"]) != 1:
+                raise ValueError("expected exactly one generated token and one top-k result")
+            output_logprob = meta["output_token_logprobs"][0][0]
+            if (isinstance(output_logprob, bool) or not isinstance(output_logprob, (int, float))
+                    or not math.isfinite(output_logprob)):
+                raise ValueError("generated token logprob must be finite")
+            row = {"token": meta["output_token_logprobs"][0][1],
+                   "top": [t[:2] for t in meta["output_top_logprobs"][0]],
+                   "prompt_lp": [t[0] for t in raw[1:]], "secs": secs,
+                   "input_id": input_id(ids), "prompt_positions": list(range(body_tail + 1, len(ids)))}
+            checked = compare([row], [row], expected_count=1)
+            if not checked["valid"]:
+                raise ValueError("; ".join(checked["problems"]))
+            if not isinstance(secs, (int, float)) or not math.isfinite(secs) or secs <= 0:
+                raise ValueError("request duration must be finite and positive")
+            rows.append(row)
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            rows.append({"error": f"invalid logprob response: {exc}"})
     return rows
 
 
-def compare(ref, got):
-    """Alignment metrics of two collect() results on the same prompts."""
-    match = 0
-    d_out, d_prompt, errors = [], [], sum("error" in g for g in got)
-    for r, g in zip(ref, got):
-        if "error" in r or "error" in g:
+def compare_results(ref: list[dict], got: list[dict], prompts: list[list[int]], tail: int = 256) -> dict:
+    """Formal gates also bind both datasets to the input of this run."""
+    metrics = compare(ref, got, expected_count=len(prompts))
+    for label, rows in (("reference", ref), ("candidate", got)):
+        if not isinstance(rows, list):
             continue
-        top_r, top_g = dict((t, lp) for lp, t in r["top"]), dict((t, lp) for lp, t in g["top"])
-        match += r["token"] == g["token"]
-        d_out += [abs(top_r[t] - top_g[t]) for t in top_r if t in top_g]
-        d_prompt += [abs(a - b) for a, b in zip(r["prompt_lp"], g["prompt_lp"])]
-    d_prompt.sort()
-    pct = lambda q: d_prompt[min(len(d_prompt) - 1, int(q * len(d_prompt)))] if d_prompt else float("nan")
-    return {"n": len(ref), "errors": errors, "first_token_match": match,
-            "max_d_out": max(d_out, default=float("nan")), "mean_d_prompt": sum(d_prompt) / max(1, len(d_prompt)),
-            "p99_d_prompt": pct(0.99), "max_d_prompt": pct(1.0), "prompt_positions": len(d_prompt)}
+        for index, (row, ids) in enumerate(zip(rows, prompts)):
+            if not isinstance(row, dict):
+                continue
+            positions = list(range(max(0, len(ids) - tail) + 1, len(ids)))
+            if row.get("input_id") != input_id(ids) or row.get("prompt_positions") != positions:
+                metrics["problems"].append(f"{label}[{index}] does not cover this run's input and positions; recollect")
+    if metrics["problems"] or not metrics["identity_verified"]:
+        metrics.update(valid=False, exact=False)
+    return metrics
 
 
 def reference(rep, args, ref_gpus, prompts):
@@ -352,12 +375,10 @@ def reference(rep, args, ref_gpus, prompts):
         with open(path, "w") as f:
             json.dump(rows, f)
         results.append(rows)
-    noise = compare(*results)
+    noise = compare_results(*results, prompts)
     rep.add("R0", f"noise floor: stock --tp {e} --ep {e} vs stock attention-DP --tp {e} --dp {e} --ep {e}",
-            f"first token {noise['first_token_match']}/{noise['n']}; prompt positions mean {noise['mean_d_prompt']:.4f}, "
-            f"p99 {noise['p99_d_prompt']:.4f}; output top-5 max {noise['max_d_out']:.3f}",
-            "measured, not judged: both are correct deployments", True)
-    return results[0], noise
+            noise, "complete successful responses for this run's inputs; noise floor measured", noise["valid"])
+    return (results[0], noise) if noise["valid"] else (None, None)
 
 
 def start_afd(args, replicas, a_gpus, f_gpus, tag):
@@ -408,28 +429,32 @@ def phase_one_replica(rep, args, a_gpus, f_gpus, prompts, ref, noise):
                 f"launcher {[x[2] + '/' + x[3] for x in args_ok]}, rank {[r['ok'] + '/' + r['total'] for r in ranks]}, "
                 f"connected to {connected.group(1) if connected else 0} F ranks", f"9/9 everywhere, afd=True, {e} F ranks",
                 bool(args_ok) and all(x[2] == x[3] == "9" for x in args_ok) and len(ranks) == 1
-                and ranks[0]["ok"] == ranks[0]["total"] == "9" and connected and int(connected.group(1)) == e)
+                and ranks[0]["ok"] == ranks[0]["total"] == "9" and bool(connected) and int(connected.group(1)) == e)
         mem = load_mem_gb(log)
         rep.add("E4", "weights kept by an A rank (no routed expert allocated or read)", f"{mem} GB",
                 "< 14 GB (stock colocated would need 166.9 GB / TP)", bool(mem) and mem[0] < 14)
         sizes = [10, 500, 3000, 6000, 16000]
-        served = [sv.generate(args.port, input_ids=(prompts[-1] * 4)[:n], timeout=300)[:2] for n in sizes]
+        sized_prompts = [(prompts[-1] * (-(-n // len(prompts[-1]))))[:n] for n in sizes]
+        served = [sv.generate(args.port, input_ids=ids, timeout=300)[:2] for ids in sized_prompts]
         rep.add("E5", "requests go through every MoE layer", dict(zip(sizes, [f"{s:.2f}s" if ok else "FAIL" for ok, s in served])),
-                "all succeed (16000 tokens = 2 chunks of n_max)", all(ok for ok, _ in served))
+                "all requested lengths succeed; chunk count follows --n-max", all(ok for ok, _ in served))
         got = collect(args.port, prompts)
         with open(os.path.join(args.out, "afd_1a.json"), "w") as fh:
             json.dump(got, fh)  # the PR-07 runs must reproduce these exactly
         if ref:
-            m = compare(ref, got)
+            m = compare_results(ref, got, prompts)
             rep.add("A1", f"first token vs the colocated reference ({m['n']} prompts, 128..{args.max_prompt} tokens)",
                     f"{m['first_token_match']}/{m['n']} identical, {m['errors']} errors",
                     f">= the stock-vs-stock floor ({noise['first_token_match']}/{noise['n']}) - 1, 0 errors",
-                    m["errors"] == 0 and m["first_token_match"] >= noise["first_token_match"] - 1)
+                    m["valid"] and m["first_token_match"] >= noise["first_token_match"] - 1)
             rep.add("A2", f"logprob deltas vs the colocated reference ({m['prompt_positions']} prompt positions)",
-                    f"mean {m['mean_d_prompt']:.4f}, p99 {m['p99_d_prompt']:.4f}, max {m['max_d_prompt']:.3f}; "
-                    f"output top-5 max {m['max_d_out']:.3f}",
+                    m,
                     f"mean and p99 <= 1.25 x the floor ({noise['mean_d_prompt']:.4f}, {noise['p99_d_prompt']:.4f})",
-                    m["mean_d_prompt"] <= 1.25 * noise["mean_d_prompt"] and m["p99_d_prompt"] <= 1.25 * noise["p99_d_prompt"])
+                    m["valid"] and m["mean_d_prompt"] <= 1.25 * noise["mean_d_prompt"]
+                    and m["p99_d_prompt"] <= 1.25 * noise["p99_d_prompt"])
+        else:
+            for cid in ("A1", "A2"):
+                rep.add(cid, "reference alignment excluded", "--skip-reference", "required for full e2e acceptance", None)
         errors, slowest, wall = soak(args.port, [p[:4096] for p in prompts], args.soak_requests, 16)
         rep.add("A3", f"soak: {args.soak_requests} requests, 16 concurrent, 128..4096 tokens",
                 f"{errors} errors, slowest {slowest:.1f}s, {wall:.0f}s wall", "0 errors, no request > 600 s", errors == 0)
@@ -439,8 +464,10 @@ def phase_one_replica(rep, args, a_gpus, f_gpus, prompts, ref, noise):
     stats = f.reports("stats")
     rep.add("E6", "F saw every MoE layer and lost nothing", {r: (s.get("layers_served"), s.get("jobs"), s.get("lost_messages", 0))
             for r, s in stats.items()}, "each rank: 43 layers, jobs > 0, lost 0, no stale epoch or dropped reply",
-            len(stats) == e and all(s.get("layers_served") == 43 and s.get("lost_messages", 0) == 0
+            set(stats) == set(range(e)) and all(s.get("layers_served") == 43 and s.get("jobs", 0) > 0
+                                     and s.get("lost_messages", 0) == 0
                                      and not s.get("stale_epoch") and not s.get("dropped_replies") for s in stats.values()))
+    return got
 
 
 def windows(prompts, n, count, start=0):
@@ -449,10 +476,69 @@ def windows(prompts, n, count, start=0):
     return [pool[(start + i * 997) % (len(pool) - n):][:n] for i in range(count)]
 
 
-def phase_replicas(rep, args, d, a_gpus, f_gpus, prompts):
-    """PR-07: D replicas share one F with no synchronization between them."""
+def run_load(short_inputs: list[list[int]], long_inputs: list[list[int]],
+             request: Callable[[list[int], int], tuple[bool, float, object]], *, short_count: int,
+             startup_timeout_s: float = 5, join_timeout_s: float = 905) -> dict:
+    """Record actual request intervals; HTTP overlap does not prove GPU kernel overlap."""
     import threading
+    from dataclasses import asdict
 
+    def sample(ids, rank):
+        started = time.monotonic()
+        try:
+            ok, _, response = request(ids, rank)
+            error = None if ok else str(response)[:300]
+        except Exception as exc:
+            ok, error = False, repr(exc)
+        finished = time.monotonic()
+        return RequestSample(ok, started, finished, finished - started, error)
+
+    solo = [sample(ids, 1) for ids in short_inputs[:short_count]]
+    stopped, entered = threading.Event(), threading.Event()
+    longs, loaded, worker_errors = [], [], []
+
+    def long_load():
+        try:
+            for ids in long_inputs:
+                if stopped.is_set():
+                    break
+                entered.set()
+                result = sample(ids, 0)
+                longs.append(result)
+                if not result.ok:
+                    break
+        except BaseException as exc:
+            worker_errors.append(repr(exc))
+
+    worker = threading.Thread(target=long_load, daemon=True)
+    worker.start()
+    try:
+        if not entered.wait(startup_timeout_s):
+            worker_errors.append("background request did not start within deadline")
+        else:
+            loaded = [sample(ids, 1) for ids in short_inputs[short_count:]]
+    finally:
+        stopped.set()
+        worker.join(timeout=join_timeout_s)
+    # Snapshot before reporting: a timed-out worker must never mutate saved evidence.
+    long_snapshot = list(longs)
+    assessment = assess_load(solo, loaded, long_snapshot, expected_count=short_count,
+                             worker_stopped=not worker.is_alive(), worker_error="; ".join(worker_errors) or None)
+
+    def serializable(samples):
+        rows = [asdict(sample) for sample in samples]
+        for row in rows:
+            for key in ("started_s", "finished_s", "elapsed_s"):
+                if not isinstance(row[key], (int, float)) or not math.isfinite(row[key]):
+                    row[key] = None  # Invalid raw value; assessment retains the failure reason.
+        return rows
+
+    return {"assessment": assessment, "clock": "time.monotonic (seconds)",
+            "solo": serializable(solo), "loaded": serializable(loaded), "long": serializable(long_snapshot)}
+
+
+def phase_replicas(rep, args, d, a_gpus, f_gpus, prompts, one_replica):
+    """PR-07: D replicas share one F with no synchronization between them."""
     f, a, ready, secs = start_afd(args, d, a_gpus[:d], f_gpus, f"afd_{d}a")
     tag = f"M{d}"
     try:
@@ -464,44 +550,28 @@ def phase_replicas(rep, args, d, a_gpus, f_gpus, prompts):
                 and all(r["world"] == "1" and r["ok"] == r["total"] == "9" for r in ranks))
         if not ready:
             return
-        one = os.path.join(args.out, "afd_1a.json")
-        if os.path.exists(one):
-            with open(one) as fh:
-                base = json.load(fh)[:16]
-            per = [compare(base, collect(args.port, prompts[:16], rank=r)) for r in range(d)]
-            rep.add(f"{tag}.1", "every replica reproduces the 1-replica AFD results (first 16 prompts)",
-                    [(m["first_token_match"], m["max_d_out"], m["max_d_prompt"]) for m in per],
-                    "each replica: 16/16 first tokens, every logprob bit-identical (max |d| = 0)",
-                    all(m["errors"] == 0 and m["first_token_match"] == 16 and m["max_d_out"] == 0 and m["max_d_prompt"] == 0
-                        for m in per))
+        count = min(16, len(prompts))
+        if one_replica is None:
+            rep.add(f"{tag}.1", "single-replica baseline missing", "current run did not produce a baseline",
+                    "current-run single-replica results required", False)
+        else:
+            per = [compare_results(one_replica[:count], collect(args.port, prompts[:count], rank=r),
+                                   prompts[:count]) for r in range(d)]
+            rep.add(f"{tag}.1", "every replica reproduces the current 1-replica AFD results", per,
+                    f"each replica: {count}/{count} first tokens, complete identity and bit-identical logprobs",
+                    all(m["valid"] and m["identity_verified"] and m["exact"] for m in per))
         errors, slowest, wall = soak(args.port, windows(prompts, 2048, 64, 11), args.soak_requests * d, 8 * d)
         rep.add(f"{tag}.2", f"soak: {args.soak_requests * d} requests, {8 * d} concurrent, routed by sglang (total_tokens)",
                 f"{errors} errors, slowest {slowest:.1f}s, {wall:.0f}s wall", "0 errors, no hang", errors == 0)
         short = windows(prompts, 1024, 2 * args.short_requests, 5)
-        solo = sorted(sv.generate(args.port, input_ids=s, rank=1)[1] for s in short[: args.short_requests])
-        stop, long_lat = threading.Event(), []
-
-        def long_load():
-            for ids in windows(prompts, args.long_len, 1000, 3):
-                if stop.is_set():
-                    return
-                ok, secs, _ = sv.generate(args.port, input_ids=ids, rank=0, timeout=900)
-                long_lat.append(secs if ok else float("inf"))
-
-        bg = threading.Thread(target=long_load, daemon=True)
-        bg.start()
-        time.sleep(2.0)  # replica 0 is inside a long prefill
-        loaded = sorted(sv.generate(args.port, input_ids=s, rank=1)[1] for s in short[args.short_requests:])
-        stop.set()
-        bg.join(timeout=900)
-        p50 = lambda v: v[len(v) // 2]
-        ratio = p50(loaded) / p50(solo)
-        rep.add(f"{tag}.3", f"no barrier: replica 1's {len(solo)} short (1024-token) requests alone vs while replica 0 "
-                f"prefills {args.long_len}-token requests",
-                f"TTFT p50 alone {p50(solo) * 1000:.0f} ms, with the long load {p50(loaded) * 1000:.0f} ms (x{ratio:.2f}); "
-                f"replica 0 long requests {len(long_lat)}, p50 {p50(sorted(long_lat)) if long_lat else float('nan'):.2f}s",
-                "x <= 1.5 (only F's queue is shared; a lock-stepped design would add replica 0's whole prefill: "
-                "the long-request time)", ratio <= 1.5 and long_lat and p50(loaded) < 0.5 * p50(sorted(long_lat)))
+        load = run_load(short, windows(prompts, args.long_len, 1000, 3),
+                        lambda ids, rank: sv.generate(args.port, input_ids=ids, rank=rank, timeout=900),
+                        short_count=args.short_requests)
+        with open(os.path.join(args.out, f"{tag}_load.json"), "w") as output:
+            json.dump(load, output, indent=2, allow_nan=False)
+        rep.add(f"{tag}.3", "no barrier: short requests alone vs overlapping long requests", load["assessment"],
+                "all requests succeed with in-flight HTTP overlap; short p50 ratio <= 1.5; "
+                "loaded short p50 < 0.5 x overlapping long p50", load["assessment"]["passed"])
     finally:
         a.stop()
         f.stop()
@@ -511,7 +581,7 @@ def phase_replicas(rep, args, d, a_gpus, f_gpus, prompts):
     rep.add(f"{tag}.4", "F served the replicas interleaved and at different layers",
             f"replica switches {switches}; consecutive jobs of different replicas at different layers {skew}",
             "> 0 replica switches and > 0 cross-replica layer gaps on every rank; lost 0",
-            bool(stats) and all(switches[r] > 0 and skew[r] > 0 and stats[r].get("lost_messages", 0) == 0 for r in stats))
+            set(stats) == set(range(len(f_gpus))) and all(switches[r] > 0 and skew[r] > 0 and stats[r].get("lost_messages", 0) == 0 for r in stats))
 
 
 def _layer_skew(trace):
@@ -521,18 +591,87 @@ def _layer_skew(trace):
 
 
 def stage_e2e(rep, args):
+    validate_args(args)
     a_gpus, f_gpus = [int(x) for x in args.a_gpus.split(",")], [int(x) for x in args.f_gpus.split(",")]
     prompts = build_prompts(args.model, args.prompts, 128, args.max_prompt, args.out)
+    if len(prompts) != args.prompts or any(not isinstance(ids, list) or len(ids) < 2 for ids in prompts):
+        raise ValueError("prompt cache does not contain the requested number of usable inputs; regenerate it")
+    if any(d > 1 for d in args.replicas) and sum(map(len, prompts)) <= max(2048, args.long_len):
+        raise ValueError("prompt corpus is too short for the requested load windows")
     ref_gpus = [int(x) for x in args.ref_gpus.split(",")] if args.ref_gpus else f_gpus
-    ref, noise = (None, None) if args.skip_reference else reference(rep, args, ref_gpus, prompts)
-    for d in args.replicas:
+    if args.skip_reference:
+        rep.add("R0", "reference excluded", "--skip-reference", "required for full e2e acceptance", None)
+        ref, noise = None, None
+    else:
+        ref, noise = reference(rep, args, ref_gpus, prompts)
+        if ref is None:
+            return
+    one_replica = None
+    for d in sorted(args.replicas):
         if d == 1:
-            phase_one_replica(rep, args, a_gpus, f_gpus, prompts, ref, noise)
-        elif d <= len(a_gpus):
-            phase_replicas(rep, args, d, a_gpus, f_gpus, prompts)
+            one_replica = phase_one_replica(rep, args, a_gpus, f_gpus, prompts, ref, noise)
+        else:
+            phase_replicas(rep, args, d, a_gpus, f_gpus, prompts, one_replica)
 
 
-def main():
+def required_checks(args: argparse.Namespace) -> set[str]:
+    if args.stage == "m0":
+        return {"U1", "U2", "U3", "N1", *(f"G{i}" for i in range(5))}
+    if args.stage in ("pr03", "pr04", "pr05"):
+        checks = {"pr03": PR03_CHECKS, "pr04": PR04_CHECKS, "pr05": PR05_CHECKS}[args.stage]
+        return {"U", *(check[0] for check in checks)}
+    required = {"R0"}
+    for replicas in args.replicas:
+        if replicas == 1:
+            required.update({*(f"E{i}" for i in range(1, 7)), "A1", "A2", "A3"})
+        else:
+            required.update(f"M{replicas}.{i}" for i in range(5))
+    return required
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    """Reject invalid scope/topology before loading models or starting processes."""
+    for field in ("n_max", "prompts", "soak_requests", "short_requests", "long_len", "startup_timeout", "test_timeout"):
+        if getattr(args, field) <= 0:
+            raise ValueError(f"{field} must be positive")
+    if args.max_prompt < 128:
+        raise ValueError("max_prompt must be at least 128")
+    if not (1 <= args.port <= 65435 and 1 <= args.rdv_port <= 65535):
+        raise ValueError("invalid port (including the +100 control offset)")
+    if args.stage != "m0" and (args.skip_gpu or args.skip_control):
+        raise ValueError("--skip-gpu and --skip-control apply only to m0")
+    if args.stage != "e2e" and (args.skip_reference or args.reuse_reference):
+        raise ValueError("reference flags apply only to e2e")
+    if args.skip_reference and args.reuse_reference:
+        raise ValueError("cannot both skip and reuse the reference")
+
+    def gpu_list(value, field):
+        ids = [int(part) for part in value.split(",")]
+        if not ids or len(ids) != len(set(ids)) or any(gpu < 0 for gpu in ids):
+            raise ValueError(f"{field} must contain distinct nonnegative GPU indices")
+        return ids
+
+    if args.stage == "e2e":
+        a_gpus = gpu_list(args.a_gpus, "a_gpus")
+        f_gpus = gpu_list(args.f_gpus, "f_gpus")
+        if set(a_gpus) & set(f_gpus):
+            raise ValueError("A and F GPU sets must be disjoint")
+        if args.ref_gpus:
+            gpu_list(args.ref_gpus, "ref_gpus")
+        if len(args.replicas) != len(set(args.replicas)) or any(d < 1 or d > len(a_gpus) for d in args.replicas):
+            raise ValueError("replicas must be distinct positive counts within the A GPU count")
+        if args.replicas and 1 not in args.replicas:
+            raise ValueError("multi-replica acceptance requires replica count 1 in the same run")
+    else:
+        gpu_list(args.gpus, "gpus")
+        if args.stage == "m0" and not args.skip_gpu and len(args.gpus.split(",")) < 2:
+            raise ValueError("m0 requires at least two A GPUs")
+        if args.stage == "m0" and not (args.skip_gpu or args.skip_control):
+            if len(gpu_list(args.control_gpus, "control_gpus")) < 2:
+                raise ValueError("m0 control requires at least two GPUs")
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("stage", choices=["m0", "pr03", "pr04", "pr05", "e2e"])
     ap.add_argument("--model", default=sv.MODEL)
@@ -552,19 +691,28 @@ def main():
     ap.add_argument("--port", type=int, default=31000)
     ap.add_argument("--rdv-port", type=int, default=9600)
     ap.add_argument("--startup-timeout", type=int, default=2400)
+    ap.add_argument("--test-timeout", type=int, default=3600, help="maximum seconds for each unittest subprocess")
     ap.add_argument("--out", default=None, help="logs and report (default /tmp/asap_reports/<stage>)")
     ap.add_argument("--reuse-reference", action="store_true", help="e2e: reuse out/reference*.json if present")
     ap.add_argument("--skip-reference", action="store_true")
     ap.add_argument("--skip-gpu", action="store_true", help="m0: CPU checks only")
     ap.add_argument("--skip-control", action="store_true", help="m0: no stock attention-DP control")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     args.out = args.out or f"/tmp/asap_reports/{args.stage}"
     os.makedirs(args.out, exist_ok=True)
-    rep = Report(args.out)
-    globals()[f"stage_{args.stage}"](rep, args)
-    rep.save()
-    print(f"\n{args.stage} acceptance: {'PASS' if rep.ok() else 'FAIL'}  (report: {args.out}/report.md)")
-    return 0 if rep.ok() else 1
+    rep = Report(args.out, required_checks(args), partial=args.stage == "e2e" and not args.replicas)
+    try:
+        validate_args(args)
+        globals()[f"stage_{args.stage}"](rep, args)
+    except (Exception, KeyboardInterrupt) as exc:
+        with open(os.path.join(args.out, "exception.log"), "w") as output:
+            traceback.print_exc(file=output)
+        rep.add("EXCEPTION", "acceptance interrupted", f"{type(exc).__name__}: {exc}", "stage must complete", False)
+    finally:
+        rep.save()
+    outcome = rep.outcome()
+    print(f"\n{args.stage} acceptance: {outcome}  (report: {args.out}/report.md)")
+    return {"PASS": 0, "FAIL": 1, "PARTIAL": 2}[outcome]
 
 
 if __name__ == "__main__":
