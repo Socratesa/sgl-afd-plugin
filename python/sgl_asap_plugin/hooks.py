@@ -17,16 +17,13 @@ launcher.
 
 from __future__ import annotations
 
-import inspect
 import logging
-import os
-import pkgutil
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Tuple
 
-from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-
-from sgl_asap_plugin.config import ENV_ROLE, AsapConfig, AsapConfigError, AsapInstallError
+from sgl_asap_plugin import _activation_requested
+from sgl_asap_plugin.compat import HookAdapter, HookType
+from sgl_asap_plugin.config import AsapConfig, AsapConfigError, AsapInstallError
 
 logger = logging.getLogger("sgl_asap_plugin")
 
@@ -49,6 +46,14 @@ class HookSpec:
 def _add_cli_args(result, parser):
     from sgl_asap_plugin import config
 
+    # The upstream config-file loader turns YAML keys into CLI options. Do not
+    # accept ASAP options if from_cli_args cannot activate them: they would be
+    # discarded when ServerArgs copies only its own dataclass fields.
+    try:
+        ensure_installed([spec for spec in SPECS if spec.tier == BASE])
+    except AsapInstallError as exc:
+        _installation_failed(exc)
+        return None
     config.add_cli_args(parser)
 
 
@@ -58,8 +63,11 @@ def _activate_from_cli(cls, args):
     cfg = AsapConfig.from_namespace(args)
     if cfg is None:
         return None
+    global _enabled
+    _enabled = True
+    ensure_installed([spec for spec in SPECS if spec.tier == BASE])
     _activate(cfg)
-    HookRegistry.apply_hooks()
+    _adapter.apply()
     ensure_installed(active_specs())
     cfg.export_env()  # children inherit the config
     _warn_if_untested()
@@ -156,6 +164,17 @@ SPECS: List[HookSpec] = [
 ]
 
 _registered: Dict[str, HookSpec] = {}
+_enabled = False
+
+
+def _installation_failed(exc: AsapConfigError | AsapInstallError) -> None:
+    """The loader swallows Exception from entry points; explicit opt-in is fatal."""
+    if _enabled or _activation_requested():
+        raise SystemExit(f"[ASAP] plugin explicitly requested but cannot start: {exc}") from exc
+    logger.warning("%s\n[ASAP] the plugin stays disabled in this process.", exc)
+
+
+_adapter = HookAdapter(_installation_failed)
 
 
 def _sglang_version():
@@ -173,38 +192,17 @@ def _warn_if_untested() -> None:
                        _sglang_version(), TESTED_SGLANG)
 
 
-def _problem(spec: HookSpec):
-    """Why ``spec`` cannot attach to this sglang build, or None."""
-    owner_path, _, attr = spec.target.rpartition(".")
-    try:
-        raw = inspect.getattr_static(pkgutil.resolve_name(owner_path), attr)
-    except Exception as exc:  # ImportError / AttributeError / ValueError from resolve_name
-        return f"{spec.target}: cannot resolve ({type(exc).__name__}: {exc})"
-    fn = raw.__func__ if isinstance(raw, (classmethod, staticmethod)) else raw
-    try:
-        names = list(inspect.signature(fn).parameters)
-    except (TypeError, ValueError) as exc:
-        return f"{spec.target}: signature unreadable ({exc})"
-    if names[: len(spec.params)] != list(spec.params):
-        return f"{spec.target}: expected leading parameters {list(spec.params)}, found {names[: len(spec.params)]}"
-    return None
-
-
 def preflight(specs: List[HookSpec]) -> None:
     """Raise AsapInstallError listing every spec that cannot attach to this sglang."""
-    problems = [p for p in map(_problem, specs) if p]
-    if problems:
-        raise AsapInstallError(f"[ASAP] hook targets do not match sglang {_sglang_version()}:\n  - "
-                               + "\n  - ".join(problems))
+    _adapter.preflight(specs)
 
 
 def register_tier(tier: str) -> List[HookSpec]:
     """Preflight, then queue every not yet registered spec of ``tier`` (idempotent). sglang's loader, or
     HookRegistry.apply_hooks(), patches the targets afterwards."""
     todo = [s for s in SPECS if s.tier == tier and s.target not in _registered]
-    preflight(todo)
+    _adapter.register(todo)
     for spec in todo:
-        HookRegistry.register(spec.target, spec.fn, spec.type)
         _registered[spec.target] = spec
     return todo
 
@@ -214,7 +212,7 @@ def active_specs() -> List[HookSpec]:
 
 
 def missing_patches(specs: List[HookSpec]) -> List[str]:
-    return sorted({s.target for s in specs} - HookRegistry._patched)
+    return _adapter.missing(specs)
 
 
 def hooks_applied() -> str:
@@ -225,10 +223,7 @@ def hooks_applied() -> str:
 
 def ensure_installed(specs: List[HookSpec]) -> None:
     """Raise if a registered hook was not applied (sglang's loader only logs that)."""
-    missing = missing_patches(specs)
-    if missing:
-        raise AsapInstallError("[ASAP] hooks registered but not applied (look for 'Failed to apply hooks' in the "
-                               "log):\n  - " + "\n  - ".join(missing))
+    _adapter.ensure(specs)
 
 
 def _activate(cfg: AsapConfig) -> None:
@@ -236,21 +231,29 @@ def _activate(cfg: AsapConfig) -> None:
     if cfg.role != "attn":
         raise AsapConfigError(f"[ASAP] role {cfg.role!r} does not run under sglang serve; start the expert "
                               "service with: python -m sgl_asap_plugin.ffn")
+    if not cfg.afd and any(spec.tier == AFD for spec in active_specs()):
+        raise AsapConfigError("[ASAP] cannot disable AFD after its hooks have been registered; "
+                              "restart the process with consistent CLI and environment options")
+    tiers = (ROLE, AFD) if cfg.afd else (ROLE,)
+    preflight([spec for spec in SPECS if spec.tier in tiers])
     register_tier(ROLE)
     if cfg.afd:
         register_tier(AFD)
 
 
 def register_plugin() -> None:
-    """Body of the entry point; sglang's loader applies the registered hooks afterwards."""
+    """Queue required hooks; the guarded loader apply pass validates installation."""
+    global _enabled
     try:
+        cfg = AsapConfig.from_env()
+        _enabled = _enabled or cfg is not None or _activation_requested()
+        tiers = (BASE, ROLE, AFD) if cfg is not None and cfg.afd else (BASE, ROLE) if cfg else (BASE,)
+        preflight([spec for spec in SPECS if spec.tier in tiers])
         register_tier(BASE)
-    except AsapInstallError as exc:  # not opted in yet: version drift must never break plain sglang
-        logger.warning("%s\n[ASAP] the plugin stays disabled in this process.", exc)
+        if cfg is not None:
+            _activate(cfg)
+    except (AsapConfigError, AsapInstallError) as exc:
+        _installation_failed(exc)
         return
-    if os.environ.get(ENV_ROLE):
-        try:
-            _activate(AsapConfig.from_env())
-        except (AsapConfigError, AsapInstallError) as exc:
-            raise SystemExit(f"[ASAP] {ENV_ROLE}={os.environ[ENV_ROLE]} but the plugin cannot start: {exc}")
+    if cfg is not None:
         _warn_if_untested()

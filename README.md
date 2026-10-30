@@ -30,6 +30,7 @@ python -B -m unittest discover -s tests -p 'test_acceptance_*.py' -v
 | `python/sgl_asap_plugin/__init__.py` | 入口点 `register()`，不导入 torch |
 | `config.py` | `--asap-*` 选项、`ASAP_*` 环境变量、A/F 两个角色的部署规则、MoE 形状 |
 | `hooks.py` | 所有 hook 的目标、类型、期望参数、原因（下表即 `hooks.SPECS`）；预检与激活 |
+| `compat.py` | SGLang Registry 兼容边界：目标与签名、注册冲突、实际回调链和安装确认 |
 | `checkpoint.py` | 两个角色各读哪些 checkpoint 张量，按名过滤、不读的张量不读盘 |
 | `attn.py` | A 侧：无权重的 `RemoteExperts`、`moe_forward`、`AttnClient`、加载完权重后连接 F |
 | `ffn.py` | F 侧：`ExpertStack`（stock `FusedMoE`）、rank 进程、启动器 |
@@ -62,7 +63,7 @@ A 与 F 必须看到同一组 GPU（同一个 `CUDA_VISIBLE_DEVICES`，用 `--ba
 
 ## Hook 表
 
-注册前由 `hooks.preflight` 按期望参数名校验每个目标，改名或签名漂移直接报错；装上后再确认每个补丁真的生效（sglang 的加载器失败时只记日志）。
+注册前由 `hooks.preflight` 按期望参数名校验每个目标，改名或签名漂移直接报错；应用前检查注册冲突，应用后核对本插件回调是否恰好存在于真实调用链中。`_patched` 标记或 `__wrapped__` 元数据不能单独证明安装成功。启动契约、插件共存边界和测试方法见 [Hook 接入文档](docs/HOOKS.md)。
 
 | 目标 | 类型 | 层级 | 作用 |
 |---|---|---|---|
@@ -76,7 +77,7 @@ A 与 F 必须看到同一组 GPU（同一个 `CUDA_VISIBLE_DEVICES`，用 `--ba
 | `sglang.srt.model_loader.weight_utils.buffered_multi_thread_safetensors_weights_iterator` | REPLACE | afd | 路由专家与 MTP 张量不读（166.9 GB 里的约 147 GB） |
 | `sglang.srt.model_loader.weight_utils.safetensors_weights_iterator` | REPLACE | afd | 同上，单线程路径 |
 
-base 层每个进程都装，只加选项；role 层只在 ASAP 部署里装；afd 层只在给了 `--asap-ffn-ranks` 的 A 角色里装。用户启用后失败一律响亮：入口点里用 `SystemExit`（sglang 的加载器只吞 `Exception`），启动进程里直接抛异常。
+base 层每个进程都尝试安装，只加选项；role 层只在 ASAP 部署里装；afd 层只在给了 `--asap-ffn-ranks` 的 A 角色里装。显式启用时，入口导入、预检或安装失败会终止启动；未启用时，接入不可用会记录警告并保留原生启动路径。CLI 激活只有在全部必要 Hook 验证成功后才导出 `ASAP_*` 配置。
 
 ## A↔F 契约
 
