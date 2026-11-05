@@ -1,0 +1,6 @@
+min_tokens: 1
+max_tokens: 1
+top_p: 1.0
+temperature: 1.0
+max_prompt_len: 131072
+extra:
