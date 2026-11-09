@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 # Set to 1 to time every job (scripts/bench_moe.py).
 ENV_TIMING = "ASAP_FFN_TIMING"
+# Set to 0 to send the replies on the compute stream, behind the experts of the next job.
+ENV_REPLY_STREAM = "ASAP_FFN_REPLY_STREAM"
 
 
 def get_new_batch_prefill(original, scheduler, running_batch):
@@ -283,6 +285,7 @@ class FfnScheduler(Scheduler):
         ).start()
         arena = DeviceBuffer(self.ffn_server.recv_base, self.g.recv_bytes)
         self.recv_arena = torch.as_tensor(arena, device=f"cuda:{get_device().gpu_id}")
+        self.init_reply_stream()
         self.layer_calls = collections.Counter()
         self.job_timer = JobTimer() if os.environ.get(ENV_TIMING) == "1" else None
         self.ready_info = {
@@ -306,6 +309,20 @@ class FfnScheduler(Scheduler):
             "memory": f"{self.ffn_server.mem.kind} ({self.ffn_server.mem.reason})",
             "arena_gb": round(self.g.recv_bytes / 1e9, 2),
         }
+
+    def init_reply_stream(self) -> None:
+        """The replies (a copy over NVLink and a done flag per row) take a stream of their
+        own, so that they run while the experts of the next job do. The graph runner has
+        two output buffers and graph jobs use them in turn: a job's reply reads its
+        buffer while the next job writes the other, and a replay of the first buffer
+        again waits (``reply_free``) until the reply that read it has been sent."""
+        self.reply_stream = None
+        if os.environ.get(ENV_REPLY_STREAM, "1") == "0":
+            return
+        self.reply_stream = torch.cuda.Stream(torch.cuda.current_device())
+        self.reply_ready = torch.cuda.Event()
+        self.reply_free = [torch.cuda.Event(), torch.cuda.Event()]
+        self.reply_turn = 0
 
     @torch.no_grad()
     def warmup(self, n_max: int) -> list:
@@ -367,7 +384,8 @@ class FfnScheduler(Scheduler):
 
     def run_job(self, job) -> None:
         """One expert call for the T rows of one replica's micro-batch, then T replies.
-        Runs between two polls, so it only enqueues GPU work."""
+        Runs between two polls, so it only enqueues GPU work. The experts run on the
+        compute stream and the replies on ``reply_stream`` (``init_reply_stream``)."""
         tic, timer = time.perf_counter(), self.job_timer
         started = timer.start() if timer else None
         rows = [self.rows_of(row) for row in job.rows]
@@ -376,20 +394,43 @@ class FfnScheduler(Scheduler):
         else:
             x, topk_ids, topk_weights = (torch.cat(part) for part in zip(*rows))
         output = None
+        reply, buffer = self.reply_stream, 0
         if self.graph_runner is not None:
-            output = self.graph_runner.run(job.layer_id, x, topk_ids, topk_weights)
+            if reply is not None:
+                buffer = self.reply_turn
+                if x.shape[0] <= self.graph_runner.buckets[-1]:
+                    # the reply that last read this buffer, before the replay overwrites it
+                    torch.cuda.current_stream().wait_event(self.reply_free[buffer])
+            output = self.graph_runner.run(
+                job.layer_id, x, topk_ids, topk_weights, buffer
+            )
+        from_graph = output is not None
         if output is None:
             topk_output = StandardTopKOutput(topk_weights, topk_ids, None)
             output = self.experts[job.layer_id](x, topk_output)
         experts = timer.event() if timer else None
-        stream = torch.cuda.current_stream().cuda_stream
+        if reply is None:
+            stream = torch.cuda.current_stream().cuda_stream
+        else:
+            if not from_graph:
+                output.record_stream(reply)
+            self.reply_ready.record(torch.cuda.current_stream())
+            reply.wait_event(self.reply_ready)
+            stream = reply.cuda_stream
         start = 0
         for row in job.rows:
             nbytes = row.n_tokens * self.g.hidden * 2
             self.ffn_server.reply(row, output[start].data_ptr(), nbytes, stream)
             start += row.n_tokens
         self.layer_calls[job.layer_id] += 1
-        if timer:
+        if reply is not None:
+            if from_graph:
+                self.reply_free[buffer].record(reply)
+                self.reply_turn = 1 - buffer
+            if timer:
+                with torch.cuda.stream(reply):  # replied: when the answers are sent
+                    timer.add(x.shape[0], started, experts, time.perf_counter() - tic)
+        elif timer:
             timer.add(x.shape[0], started, experts, time.perf_counter() - tic)
 
     def rows_of(self, row):
