@@ -15,9 +15,7 @@ waits). The CPU never waits for F, so it keeps launching the next layers while t
 from __future__ import annotations
 
 import collections
-import ctypes
 import json
-import mmap
 import os
 import socket
 import threading
@@ -36,6 +34,8 @@ from sgl_asap_plugin.transport.layout import (
     HandshakeError,
     pack_doorbell,
 )
+from sgl_asap_plugin.transport.memory import Shared
+from sgl_asap_plugin.transport.memory import select as select_memory
 
 MAX_HANDSHAKE_BYTES = 1 << 20
 
@@ -193,11 +193,13 @@ class AttnChannel:
         seq_base: int = 0,
         timeout_s: float = 60.0,
         connect_timeout_s: float = 60.0,
+        memory: str = "auto",
         hello: Optional[dict] = None,
         _backpressure: bool = True,
         _epoch_override: Optional[int] = None,
     ):
-        """``hello`` is merged into the handshake message (the plugin sends its model fingerprint there).
+        """``memory``: how the arenas are shared (memory.py: auto, ipc or fabric); F must resolve to the same.
+        ``hello`` is merged into the handshake message (the plugin sends its model fingerprint there).
         ``_backpressure`` / ``_epoch_override`` exist only for tests that must provoke protocol violations."""
         if len(endpoints) != geometry.num_f:
             raise ValueError(
@@ -218,22 +220,27 @@ class AttnChannel:
         )
         self.hello = dict(hello or {})
         self._backpressure, self._epoch_override = _backpressure, _epoch_override
+        self.memory, self.mem = memory, None  # the requested backend, the one connect() chose
         self._poison: Optional[ChannelPoisoned] = None
         self._watchdog: Optional[Watchdog] = None
-        self._result: Optional[int] = None
+        self._result_mem: Optional[Shared] = None
+        self._result: Optional[int] = None  # its device address
         self._recv: List[int] = []  # F rank f's RecvArena, mapped here
-        self._bells: List[int] = []  # device address of F rank f's slot file
-        self._maps: List[tuple] = []  # (mmap, host address) per slot file
+        self._bells: List[int] = []  # device address of F rank f's doorbell page
+        self._maps: List[Shared] = []  # every mapping of an F rank's memory, released by close()
         self._epoch: List[int] = []
         self.replies: List[
             dict
         ] = []  # F's handshake answers (what each rank serves, for logs)
 
     def connect(self) -> AttnChannel:
-        """Allocate the ResultArena, hand it to every F rank, map their RecvArenas and slot files."""
+        """Allocate the ResultArena, hand it to every F rank, map their RecvArenas and doorbell pages."""
         g = self.g
         self.device.activate()
-        self._result = cu.mem_alloc(g.result_bytes)
+        if self.mem is None:
+            self.mem = select_memory(self.memory, self.device.ordinal)
+        self._result_mem = self.mem.device(g.result_bytes)
+        self._result = self._result_mem.ptr
         cu.memset32(
             self._result, self.seq_base, g.flags_bytes // 4
         )  # every done flag starts at seq_base
@@ -243,7 +250,9 @@ class AttnChannel:
             "a": self.a,
             "geometry": g.as_dict(),
             "pid": os.getpid(),
-            "result_handle": cu.ipc_export(self._result).hex(),
+            "memory": self.mem.kind,
+            "peer": self.mem.identity(),
+            "result": self._result_mem.desc,
         }
         try:
             for host, port in self.endpoints:
@@ -254,8 +263,12 @@ class AttnChannel:
                     raise HandshakeError(
                         f"seq_base A={self.seq_base} F={reply['seq_base']}"
                     )
-                self._recv.append(cu.ipc_open(bytes.fromhex(reply["recv_handle"])))
-                self._bells.append(self._map_slot_file(reply["shm_path"]))
+                recv = self.mem.open(reply["recv"])
+                self._maps.append(recv)
+                self._recv.append(recv.ptr)
+                bells = self.mem.open_doorbells(reply["doorbells"], g.host_bytes)
+                self._maps.append(bells)
+                self._bells.append(bells.ptr)
                 self._epoch.append(reply["epoch"])
                 self.replies.append(reply)
         except BaseException:
@@ -266,19 +279,6 @@ class AttnChannel:
         self._watchdog = Watchdog(self.device, self.timeout_s, self._on_timeout)
         self._watchdog.start()
         return self
-
-    def _map_slot_file(self, path: str) -> int:
-        """mmap F's /dev/shm slot file and register it so this GPU can write the doorbells -> device address."""
-        fd = os.open(path, os.O_RDWR)
-        try:
-            mm = mmap.mmap(fd, self.g.host_bytes)
-        finally:
-            os.close(fd)
-        buf = ctypes.c_char.from_buffer(mm)
-        addr = ctypes.addressof(buf)
-        del buf  # the address stays valid while the mapping is open; a live export would block mm.close()
-        self._maps.append((mm, addr))
-        return cu.host_register(addr, self.g.host_bytes)
 
     def reconnect(self) -> AttnChannel:
         """The only way out of a poisoned channel: a new epoch and a fresh ResultArena on every F rank."""
@@ -291,21 +291,12 @@ class AttnChannel:
             self._watchdog.stop()
             self._watchdog = None
         self.device.activate()
-        for base in self._recv:
-            cu.ipc_close(base)
-        for mm, addr in self._maps:
-            cu.host_unregister(addr)
-            mm.close()
-        if self._result is not None:
-            cu.mem_free(self._result)
-        self._recv, self._bells, self._maps, self._epoch, self.replies, self._result = (
-            [],
-            [],
-            [],
-            [],
-            [],
-            None,
-        )
+        for shared in self._maps:
+            shared.release()
+        if self._result_mem is not None:
+            self._result_mem.release()
+        self._recv, self._bells, self._maps, self._epoch, self.replies = [], [], [], [], []
+        self._result_mem = self._result = None
 
     def _on_timeout(self, phase: _Phase) -> None:
         """Watchdog callback: remember why, so check() / send() raise from now on."""

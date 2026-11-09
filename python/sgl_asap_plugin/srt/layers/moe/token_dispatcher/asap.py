@@ -116,7 +116,9 @@ class AsapBuffer:
                 "--asap-ffn-size is set, but the model has no AsapMoE layer"
             )
         args, parallel = get_asap_args(), get_parallel()
-        rank = (parallel.dp_rank or 0) * args.asap_attn_tp_size + parallel.tp_rank
+        # The global replica number: other attention instances may share the FFN ranks.
+        replica = args.asap_attn_base_replica + (parallel.dp_rank or 0)
+        rank = replica * args.asap_attn_tp_size + parallel.tp_rank
         model = {
             "hidden": layers[0].hidden_size,
             "topk": layers[0].top_k,
@@ -128,6 +130,7 @@ class AsapBuffer:
             transport_geometry(args, model["hidden"], model["topk"]),
             bootstrap_endpoints(args),
             device=model_runner.gpu_id,
+            memory=args.asap_transport_mem,
             hello={"model": model},
             timeout_s=float(os.environ.get("ASAP_WAITING_TIMEOUT", "60")),
             connect_timeout_s=float(os.environ.get("ASAP_BOOTSTRAP_TIMEOUT", "1800")),
@@ -138,7 +141,8 @@ class AsapBuffer:
             for r in channel.replies
         ]
         logger.info(
-            f"[ASAP] attention rank {rank} connected to {len(served)} FFN ranks: {served}"
+            f"[ASAP] attention rank {rank} connected to {len(served)} FFN ranks over "
+            f"{channel.mem.kind} memory ({channel.mem.reason}): {served}"
         )
         return cls._buffer
 

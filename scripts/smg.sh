@@ -2,9 +2,11 @@
 
 set -euo pipefail
 
-kill $(lsof -t -iTCP:20010 -sTCP:LISTEN) || true
+# lsof prints nothing when the port is free; kill with no pid exits 2 and prints a usage line.
+pids=$(lsof -t -iTCP:20010 -sTCP:LISTEN || true)
+[ -z "$pids" ] || kill $pids || true
 
-sleep 20
+sleep 10
 
 # Mix instance: prefill and decode share one process. Regular routing uses
 # --policy; --prefill-policy / --decode-policy only apply with --pd-disaggregation.
@@ -18,6 +20,8 @@ sleep 20
 # run_asap.sh and run_ep.sh both bind the engine to 127.0.0.1:30000.
 HOST=${HOST:-0.0.0.0}
 SERVE=${SERVE:-127.0.0.1}
+# Several engines, e.g. the A instances of run_asap_cross.sh: WORKER_URLS="http://IP1:30000 http://IP2:30000".
+WORKER_URLS=${WORKER_URLS:-http://${SERVE}:30000}
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 LOG_DIR=${LOG_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)/logs}
 mkdir -p "$LOG_DIR"
@@ -28,7 +32,7 @@ if [[ ! -x "$SMG_BIN" ]]; then
   exit 1
 fi
 "$SMG_BIN" launch \
-  --worker-urls "http://${SERVE}:30000" \
+  --worker-urls ${WORKER_URLS} \
   --policy cache_aware \
   --dp-aware \
   --balance-abs-threshold 20 \

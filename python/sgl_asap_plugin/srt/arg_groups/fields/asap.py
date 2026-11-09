@@ -31,6 +31,15 @@ class Asap(msgspec.Struct):
         "HOST:PORT where FFN rank 0 accepts the attention ranks; FFN rank f listens on "
         "PORT + f.",
     ] = "127.0.0.1:9600"
+    asap_transport_mem: A[
+        Literal["auto", "ipc", "fabric"],
+        "How attention and FFN ranks share the transfer buffers. 'ipc': CUDA IPC and "
+        "/dev/shm, both roles on one node with the same CUDA_VISIBLE_DEVICES (H100, "
+        "B200). 'fabric': CUDA fabric handles, any GPUs of one NVLink domain, e.g. the "
+        "two roles on different GB200 trays (needs IMEX). 'auto': fabric on a GPU of a "
+        "multi-node NVLink fabric where a trial allocation works, else ipc. Both roles "
+        "must end up with the same.",
+    ] = "auto"
     asap_max_dispatch_tokens: A[
         int,
         "Max tokens of one dispatch (one MoE layer of one forward); sizes the transfer "
@@ -67,8 +76,16 @@ class Asap(msgspec.Struct):
     ] = 0
     asap_attn_dp_size: A[
         Optional[int],
-        "--dp-size of the attention role. Required on the FFN role.",
+        "Attention replicas in all, over every attention instance (one per node) that "
+        "shares the FFN ranks. Required on the FFN role; an attention instance defaults "
+        "it to its --dp-size, i.e. to being the only one.",
     ] = None
+    asap_attn_base_replica: A[
+        int,
+        "Attention role: the number of this instance's first replica among the "
+        "--asap-attn-dp-size replicas. Its replicas are [base, base + --dp-size); the "
+        "instances sharing the FFN ranks must not overlap.",
+    ] = 0
     asap_attn_tp_size: A[
         Optional[int],
         "--tp-size of the attention role. Required on the FFN role.",

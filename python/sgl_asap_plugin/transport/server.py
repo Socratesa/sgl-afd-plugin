@@ -1,5 +1,6 @@
-"""F side of the transport: one FfnServer per F rank owns a RecvArena and a slot file (layout.py), discovers
-messages by polling the slot file, and answers each with a partial sum written into the sender's ResultArena.
+"""F side of the transport: one FfnServer per F rank owns a RecvArena and a doorbell page (layout.py; memory.py
+shares them), discovers messages by polling the doorbell page, and answers each with a partial sum written into
+the sender's ResultArena.
 
 Threads of an F rank process:
 * the handshake thread accepts A ranks (one JSON line in, one out), validates them and maps their ResultArena;
@@ -15,8 +16,8 @@ taken in round-robin order of the A rank, so a low rank number gives no priority
 from __future__ import annotations
 
 import collections
+import ctypes
 import json
-import mmap
 import os
 import socket
 import sys
@@ -38,6 +39,8 @@ from sgl_asap_plugin.transport.layout import (
     HandshakeError,
     unpack_doorbell,
 )
+from sgl_asap_plugin.transport.memory import Shared
+from sgl_asap_plugin.transport.memory import select as select_memory
 
 
 @dataclass
@@ -45,9 +48,11 @@ class Peer:
     """A connected A rank: where its ResultArena is mapped and which epoch its messages must carry."""
 
     a: int
-    result_base: int  # its ResultArena, mapped here through CUDA IPC
+    result_base: int  # its ResultArena, mapped here (memory.py)
     epoch: int
     pid: int
+    mapping: Optional[Shared] = None  # the mapping at result_base, released on close or reconnect
+    host: Optional[str] = None  # where it runs; a reconnect comes from the same host
 
 
 @dataclass
@@ -89,14 +94,18 @@ class FfnServer:
         host: str = "127.0.0.1",
         port: int = 0,
         seq_base: int = 0,
+        memory: str = "auto",
         model: Optional[dict] = None,
         info: Optional[dict] = None,
         trace_len: int = 4096,
     ):
-        """``model``: fingerprint every A rank must send in its hello (None skips the check).
+        """``memory``: how the RecvArena and the doorbell page are shared (memory.py: auto, ipc or fabric); every
+        A rank must resolve to the same. ``run_dir``: where the ipc backend puts the doorbell file (/dev/shm).
+        ``model``: fingerprint every A rank must send in its hello (None skips the check).
         ``info``: extra fields of the handshake answer (what this rank serves, for A's logs).
         ``trace_len``: how many recent jobs ``trace`` keeps as (replica, slot, layer_id)."""
         self.f, self.g, self.seq_base = f_rank, geometry, seq_base
+        self.memory, self.mem = memory, None  # the requested backend, the one start() chose
         self.model, self.info = model, dict(info or {})
         self.device, self.run_dir, self.host, self._port_req = (
             cu.Device(device),
@@ -117,20 +126,19 @@ class FfnServer:
         self._prev_replica = None
 
     def start(self) -> FfnServer:
-        """Allocate and zero the RecvArena and the slot file, then listen for A ranks."""
+        """Allocate and zero the RecvArena and the doorbell page, then listen for A ranks."""
         g = self.g
         self.device.activate()
-        self.recv_base = cu.mem_alloc(g.recv_bytes)
+        self.mem = select_memory(self.memory, self.device.ordinal)
+        self._recv = self.mem.device(g.recv_bytes)
+        self.recv_base = self._recv.ptr
         cu.memset8(self.recv_base, 0, g.recv_bytes)
-        self.recv_handle = cu.ipc_export(self.recv_base).hex()
-        self.shm_path = os.path.join(self.run_dir, f"asap_f{self.f}.slots")
-        fd = os.open(self.shm_path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.ftruncate(fd, g.host_bytes)
-            self._mm = mmap.mmap(fd, g.host_bytes)
-        finally:
-            os.close(fd)
-        words = np.frombuffer(self._mm, dtype=np.uint64)
+        self._page = self.mem.doorbells(
+            g.host_bytes, os.path.join(self.run_dir, f"asap_f{self.f}.slots")
+        )
+        words = np.ctypeslib.as_array(
+            (ctypes.c_uint64 * (g.host_bytes // 8)).from_address(self._page.ptr)
+        )
         # word 0 of each cache line; a strided view, so the poller copies it before decoding
         self._bells = words[: g.num_a * g.slots * (BELL_STRIDE // 8)].reshape(
             -1, BELL_STRIDE // 8
@@ -171,12 +179,19 @@ class FfnServer:
                     pass
 
     def _on_hello(self, hello: dict) -> dict:
-        """Admit A rank ``hello['a']``: check protocol, geometry and model; map its ResultArena; new epoch."""
+        """Admit A rank ``hello['a']``: check protocol, memory, geometry and model, and that no other host
+        holds the rank; map its ResultArena; new epoch."""
         g = self.g
         if hello.get("proto") != PROTO_VERSION:
             raise HandshakeError(
                 f"protocol version A={hello.get('proto')} F={PROTO_VERSION}"
             )
+        if hello.get("memory") != self.mem.kind:
+            raise HandshakeError(
+                f"transport memory A={hello.get('memory')} F={self.mem.kind} ({self.mem.reason}): "
+                "give both roles the same --asap-transport-mem"
+            )
+        self.mem.check_peer(hello.get("peer") or {})
         theirs = hello.get("geometry", {})
         diff = [
             f"{k}: A={theirs.get(k)} F={v}"
@@ -201,17 +216,28 @@ class FfnServer:
         a = int(hello["a"])
         if not 0 <= a < g.num_a:
             raise HandshakeError(f"A rank {a} is outside [0, {g.num_a})")
+        host = (hello.get("peer") or {}).get("host")
+        with self._lock:
+            old = self.peers.get(a)
+        if old is not None and old.host != host:  # not a reconnect: two A instances number a rank alike
+            raise HandshakeError(
+                f"A rank {a} is connected from {old.host} (pid {old.pid}), and {host} claims it too: "
+                "the attention instances sharing the FFN ranks need disjoint --asap-attn-base-replica ranges"
+            )
         self.device.activate()
+        result = self.mem.open(hello["result"])  # before the old mapping goes: this may fail
         with self._lock:
             old = self.peers.get(a)
             if old is not None:  # a restarted or reconnecting A rank
-                cu.ipc_close(old.result_base)
+                old.mapping.release()
                 self.stats["reconnects"] += 1
             peer = Peer(
                 a,
-                cu.ipc_open(bytes.fromhex(hello["result_handle"])),
+                result.ptr,
                 (old.epoch % MAX_EPOCH) + 1 if old else 1,
                 int(hello.get("pid", 0)),
+                result,
+                host,
             )
             self.peers[a] = peer
             lo = a * g.slots
@@ -226,8 +252,9 @@ class FfnServer:
             "f": self.f,
             "epoch": peer.epoch,
             "seq_base": self.seq_base,
-            "recv_handle": self.recv_handle,
-            "shm_path": self.shm_path,
+            "memory": self.mem.kind,
+            "recv": self._recv.desc,
+            "doorbells": self._page.desc,
             **self.info,
         }
 
@@ -350,18 +377,14 @@ class FfnServer:
                 time.sleep(idle_sleep_s)
 
     def close(self) -> None:
-        """Stop the handshake thread, unmap the A arenas, remove the slot file, free the RecvArena."""
+        """Stop the handshake thread, unmap the A arenas, free the doorbell page and the RecvArena."""
         self._hs_stop.set()
         self._hs_thread.join(timeout=2.0)
         self._srv.close()
         self.device.activate()
         for peer in self.peers.values():
-            cu.ipc_close(peer.result_base)
+            peer.mapping.release()
         self.peers.clear()
-        self._bells = None  # the numpy view pins the mmap
-        self._mm.close()
-        try:
-            os.unlink(self.shm_path)
-        except FileNotFoundError:
-            pass
-        cu.mem_free(self.recv_base)
+        self._bells = None  # a view of the doorbell page, which release() unmaps
+        self._page.release()  # ipc: also removes the /dev/shm file
+        self._recv.release()

@@ -56,7 +56,9 @@ def check_asap_server_args(server_args) -> None:
     check_asap_deployment(cfg, args)
     if args.asap_role == "attn":
         args = msgspec.structs.replace(
-            args, asap_attn_dp_size=cfg.dp_size, asap_attn_tp_size=cfg.tp_size
+            args,
+            asap_attn_dp_size=args.asap_attn_dp_size or cfg.dp_size,
+            asap_attn_tp_size=cfg.tp_size,
         )
     else:
         args = msgspec.structs.replace(args, asap_ffn_size=cfg.ep_size)
@@ -83,7 +85,8 @@ def check_asap_deployment(cfg, args: Asap) -> None:
         raise ValueError("ASAP does not support pipeline parallelism (--pp-size 1)")
     if cfg.nnodes != 1:
         raise ValueError(
-            "ASAP's transport is CUDA IPC: attention and FFN share one node"
+            "Each ASAP role runs on one node (--nnodes 1); the attention and FFN roles "
+            "can be on different GB200 trays with --asap-transport-mem fabric"
         )
     if cfg.moe_a2a_backend != "none":
         raise ValueError("ASAP replaces the MoE all-to-all: use --moe-a2a-backend none")
@@ -154,9 +157,12 @@ def _check_attn_role(cfg, args: Asap) -> None:
         )
     if cfg.disaggregation_mode == "decode":
         raise ValueError("ASAP serves the prefill phase: --disaggregation-mode decode")
-    if args.asap_attn_dp_size not in (None, cfg.dp_size):
+    total, base = args.asap_attn_dp_size or cfg.dp_size, args.asap_attn_base_replica
+    if not 0 <= base <= total - cfg.dp_size:
         raise ValueError(
-            f"--asap-attn-dp-size {args.asap_attn_dp_size} != --dp-size {cfg.dp_size}"
+            f"The replicas of this instance, [{base}, {base + cfg.dp_size}) "
+            f"(--asap-attn-base-replica {base}, --dp-size {cfg.dp_size}), must lie "
+            f"within the --asap-attn-dp-size {total} replicas of the deployment"
         )
     if args.asap_attn_tp_size not in (None, cfg.tp_size):
         raise ValueError(

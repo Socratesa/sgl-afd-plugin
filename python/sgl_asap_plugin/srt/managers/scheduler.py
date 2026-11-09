@@ -277,6 +277,7 @@ class FfnScheduler(Scheduler):
             run_dir=os.environ[ENV_RUN_DIR],
             host=host,
             port=int(port) + self.f,
+            memory=args.asap_transport_mem,
             model=model_info,
             info=served,
         ).start()
@@ -302,6 +303,7 @@ class FfnScheduler(Scheduler):
                 else {}
             ),
             "port": self.ffn_server.port,
+            "memory": f"{self.ffn_server.mem.kind} ({self.ffn_server.mem.reason})",
             "arena_gb": round(self.g.recv_bytes / 1e9, 2),
         }
 

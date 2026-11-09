@@ -1,4 +1,4 @@
-# sgl-asap-plugin
+# sgl-afd-plugin
 
 SGLang 插件：prefill 阶段的 ASAP 式 Attention-FFN 分离（AFD）。
 
@@ -6,14 +6,16 @@ SGLang 插件：prefill 阶段的 ASAP 式 Attention-FFN 分离（AFD）。
  A 副本 0 (GPU a0) ─┐                        ┌─ F rank 0 (GPU f0): 专家 [0, P)
  A 副本 1 (GPU a1) ─┼── 每层 MoE：x, ids, w ──┼─ F rank 1 (GPU f1): 专家 [P, 2P)
    ...              │   ←── 部分和 ──────────  │   ...
- A 副本 D-1 ────────┘   (CUDA IPC + 流内存操作) └─ F rank E-1
+ A 副本 D-1 ────────┘ (IPC/fabric + 流内存操作) └─ F rank E-1
 ```
 
 插件只提供 A↔F 的通信库（`transport/`）和把它接进 SGLang 的代码；进程、调度、加载、并行都是 SGLang 自己的。包的结构与 `sglang` 相同：`srt/` 下每个模块都放在它挂接或扩展的 SGLang 模块的同一路径上。
 
 - **A（attention）**：`sglang serve --asap-role attn --asap-ffn-size E --dp-size D --tp-size 1`，D 个纯 DP 副本，每个副本是独立的 torch.distributed world，副本之间没有同步。跑 SGLang 自己的模型：`get_moe_impl_class` 返回 `AsapMoE`（没有专家权重的 FusedMoE），它的 `dispatcher` 是 `BaseDispatcher` 的子类 `AsapDispatcher`：`dispatch()` 把这一层的 token 发给 F，`combine()` 等 F 回复并求和。gate、top-k、共享专家照常在 A 上算。shared experts 默认在计算流上按 dispatch → shared GEMM → combine 执行，copy 使用单独的发送流，与 F 的 routed experts 重叠。
 - **F（FFN）**：`sglang serve --asap-role ffn --tp-size E --ep-size E`，E 个纯 EP rank，rank 之间不通信，按到达顺序逐层服务所有副本。启动进程只拉 scheduler rank 和 `/health`（同 `--node-rank >= 1` 的节点）；每个 rank 是 `FfnScheduler`（`Scheduler` 子类：初始化到 model worker 为止，不建 KV cache、attention backend、CUDA graph 和请求路径）。模型是 `srt/models/` 里该模型族的 F 侧模型：只有每层的路由专家，由 SGLang 的 loader 加载。
-- **A↔F**：静态 arena + 单边拷贝 + 64 位 doorbell + 流内存操作等待；A 的 CPU 从不等 F。内存布局与协议写在 `transport/layout.py` 的模块文档里。
+- **A↔F**：静态 arena + 单边拷贝 + 64 位 doorbell + 流内存操作等待；A 的 CPU 从不等 F。内存布局与协议写在 `transport/layout.py` 的模块文档里。arena 和 doorbell 页怎么共享由 `transport/memory.py` 决定（`--asap-transport-mem`）：`ipc` 是 CUDA IPC 加 /dev/shm，只在一个 OS 内（H100、B200 单机）；`fabric` 是 CUDA fabric handle，同一个 NVLink 域内都行，GB200 上 A 与 F 可以在不同 tray。协议本身两者相同。
+
+- **跨 tray（GB200）**A 与 F 可以放在同一个 NVLink 域的不同 tray 上（`nvidia-smi -q` 的 Fabric 里 ClusterUUID 与 CliqueId 相同）。每次启动仍是单机（`--nnodes 1`）：A 要占多台 tray 时，每台各起一个 A 实例，而不是一个 `--nnodes > 1` 的进程组。所有实例共用同一组 F，每个都填同一个 `--asap-attn-dp-size`（全部副本总数），用 `--asap-attn-base-replica` 各占一段不重叠的副本号（实例 i 的副本是 `[B, B + --dp-size)`）。各实例有自己的 scheduler 和 HTTP 端口，副本之间没有 torch.distributed 同步；请求由外面的路由打到这些端口（`scripts/smg.sh` 的 `WORKER_URLS`）。`--asap-bootstrap-addr` 写 F 所在 tray 的 IP（F 绑定它，每个 A 连它）；`--asap-transport-mem` 用默认的 `auto`（GB200 上即 fabric）或显式 `fabric`。A 与 F 不需要相同的 `CUDA_VISIBLE_DEVICES`，一个 A 实例也可以和 F 放在同一台 tray 的不同 GPU 上。A 与 F 必须在同一个 NVLink 域里，没有走网络的后端，跨域时握手拒绝。`scripts/run_asap_cross.sh` 按 `A_HOSTS` 起这些实例。
 
 
 ## 支持的模型
@@ -41,13 +43,15 @@ bash scripts/launch_asap.sh                   # 2A4F：A 在 GPU 0、1，F 在 G
 |---|---|---|
 | `--asap-role {null,attn,ffn}` | `ASAP_ROLE` | 角色，默认 `null`（不启用），两种角色都用 `sglang serve`。`attn`：`--dp-size D` 个纯 DP 副本；`ffn`：专家服务，`--tp-size E --ep-size E` |
 | `--asap-bootstrap-addr HOST:PORT` | `ASAP_BOOTSTRAP_ADDR` | F rank 0 的握手地址，rank f 用端口 + f。默认 `127.0.0.1:9600`（要在 10000 以下：本机把 10000-61000 分给外连源端口） |
+| `--asap-transport-mem {auto,ipc,fabric}` | `ASAP_TRANSPORT_MEM` | A↔F 共享内存的方式（`transport/memory.py`）。`ipc`：CUDA IPC + /dev/shm，两个角色在同一台机器上、用同一个 `CUDA_VISIBLE_DEVICES`。`fabric`：CUDA fabric handle，同一个 NVLink 域内任意 GPU
 | `--asap-max-dispatch-tokens N` | `ASAP_MAX_DISPATCH_TOKENS` | 一次 dispatch（一层 MoE、一次前向）的最大 token 数，决定 arena 大小，默认 16384。A 上 `--chunked-prefill-size` 与 `--max-prefill-tokens` 不能超过它 |
 | `--asap-max-micro-batches S` | `ASAP_MAX_MICRO_BATCHES` | 每个 A rank 同时在途的 micro-batch 数（F 上每个 A rank 的接收槽位），默认 2（同步前向用 1 个，dual-batch 用 2 个） |
 | `--asap-min-batch-tokens N` | `ASAP_MIN_BATCH_TOKENS` | A（AFD）：等待中的请求要算的 token（prompt 减去 radix cache 命中的前缀）凑够 N 个、或最老的等满 `--asap-max-wait-ms` 才出 prefill 批（length-aware batching）。批大则每层发给 F 的 job 大，F 每 token 便宜得多。超出 `--chunked-prefill-size` 的部分由 SGLang 的 chunked prefill 截断，余下的留到下一步。默认 0，即不等 |
 | `--asap-max-wait-ms T` | `ASAP_MAX_WAIT_MS` | A：上一项里请求最多等多久，默认 50 |
 | `--asap-tbo-min-tokens N` | `ASAP_TBO_MIN_TOKENS` | A（AFD）加 `--enable-two-batch-overlap` 时，只拆至少 N 个 token 的 prefill 批，默认 6144。小批受 CPU 下发限制，拆成两半下发量翻倍，反而更慢（`docs/DBO.md`） |
 | `--asap-ffn-cuda-graph-max-tokens N` | `ASAP_FFN_CUDA_GRAPH_MAX_TOKENS` | F：每层的专家调用按 2 的幂分桶捕获 CUDA graph，job 不超过 N 个 token 时重放，省掉每个 job 0.3–0.9 ms 的下发（`docs/BENCH_MOE.md`）。默认 0，即 eager |
-| `--asap-attn-dp-size D` | `ASAP_ATTN_DP_SIZE` | A 角色的 `--dp-size`。F 必填；A 上由 `--dp-size` 得出 |
+| `--asap-attn-dp-size D` | `ASAP_ATTN_DP_SIZE` | 共用这组 F 的所有 A 实例的副本总数。F 必填；只有一个 A 实例时 A 上可省，取它的 `--dp-size`；多个 A 实例时每个都填同一个总数 |
+| `--asap-attn-base-replica B` | `ASAP_ATTN_BASE_REPLICA` | A：本实例第一个副本在全部 D 个副本里的编号，默认 0。本实例的副本是 `[B, B + --dp-size)`，必须在 D 以内，且各实例不重叠；F 拒绝另一台机器上的进程连一个已被占用的编号 |
 | `--asap-attn-tp-size T` | `ASAP_ATTN_TP_SIZE` | A 角色的 `--tp-size`。F 必填；A 上由 `--tp-size` 得出（AFD 目前只支持 1） |
 | `--asap-ffn-size E` | `ASAP_FFN_SIZE` | F rank 数。A 上给了它才进入 AFD 模式（专家在 F 上），不给则专家留在本地，只是纯 DP。F 上默认等于 `--ep-size` |
 

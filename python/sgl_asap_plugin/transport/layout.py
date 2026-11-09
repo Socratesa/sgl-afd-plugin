@@ -17,18 +17,19 @@ A's CPU only enqueues; the GPU streams carry the dependencies:
 
 Memory owned by F rank f (``Geometry`` gives every offset; regions are ALIGN-aligned):
 
-    RecvArena, device memory, written by A ranks through CUDA IPC (recv_bytes):
+    RecvArena, device memory, written by A ranks through their mapping of it (memory.py) (recv_bytes):
     | region(a=0,s=0)                                  | region(0,1) | ... | region(num_a-1, slots-1) |
     | x [n_max, hidden] bf16 | ids [n_max, topk] i32 | w [n_max, topk] f32 |
     0                     ids_off                  w_off             region_bytes
     region(a, s) starts at (a * slots + s) * region_bytes
 
-    slot file, host memory (/dev/shm, host_bytes), written by A's GPU with one 64-bit memop:
+    doorbell page, host memory (memory.py: a /dev/shm file or fabric-shared memory of the host NUMA node next to
+    F's GPU; host_bytes), written by A's GPU with one 64-bit memop:
     | bell(0,0) .. 64 B | bell(0,1) .. 64 B | ... |     one cache line per (a, s), doorbell in word 0
 
 Memory owned by A rank a:
 
-    ResultArena, device memory, written by F ranks through CUDA IPC (result_bytes):
+    ResultArena, device memory, written by F ranks through their mapping of it (memory.py) (result_bytes):
     | done(0,0) 64 B | done(0,1) | ... (FLAGS_PAGE = 2 MiB) | seg(f=0,s=0) [n_max, hidden] bf16 | seg(0,1) | ... |
     0                                                      flags_bytes = seg_off(0, 0)
 
@@ -59,12 +60,12 @@ from dataclasses import asdict, dataclass, fields
 ALIGN = 256
 FLAG_STRIDE = 64  # one done flag per cache line
 FLAGS_PAGE = 2 << 20  # done flags get a page with no payload (see the module docstring)
-BELL_STRIDE = 64  # one doorbell per cache line of the slot file
+BELL_STRIDE = 64  # one doorbell per cache line of the doorbell page
 ACT_BYTES = 2  # x is bf16
 ID_BYTES = 4  # topk ids are int32 logical expert ids
 W_BYTES = 4  # topk weights are fp32
 
-PROTO_VERSION = 3
+PROTO_VERSION = 4  # 4: typed memory descriptors in the handshake (memory.py)
 SEQ_MASK = 0xFFFFFFFF
 MAX_TOKENS = (1 << 17) - 1
 MAX_LAYER = (1 << 10) - 1
@@ -115,7 +116,7 @@ def unpack_doorbell(word: int):
 class Geometry:
     """Sizes of one deployment; A and F refuse to connect unless every field matches."""
 
-    num_a: int  # A ranks = D replicas * T TP ranks each; A rank a = replica * group + tp_rank
+    num_a: int  # A ranks = D replicas (of every A instance) * T TP ranks each; a = replica * group + tp_rank
     group: int  # T: the A ranks of one replica; F joins their T rows into one job
     slots: int  # micro-batches in flight per A rank (the synchronous forward uses 1, dual-batch 2)
     n_max: int  # max tokens per message
@@ -159,13 +160,13 @@ class Geometry:
         """Offset of A rank a's slot-s region in an F rank's RecvArena."""
         return (a * self.slots + s) * self.region_bytes
 
-    # ---- F rank: slot file (host) ----
+    # ---- F rank: doorbell page (host) ----
     @property
     def host_bytes(self) -> int:
         return align_up(self.num_a * self.slots * BELL_STRIDE, 4096)
 
     def bell_off(self, a: int, s: int) -> int:
-        """Offset of A rank a's slot-s doorbell in an F rank's slot file."""
+        """Offset of A rank a's slot-s doorbell in an F rank's doorbell page."""
         return (a * self.slots + s) * BELL_STRIDE
 
     # ---- A rank: ResultArena (device) ----

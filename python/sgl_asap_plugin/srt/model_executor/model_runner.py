@@ -24,7 +24,8 @@ def load_model(result, model_runner) -> None:
     # Plain DP: the world of a replica is its TP group, not dp_size * tp_size.
     world_size = dist.get_world_size() if dist.is_initialized() else None
     logger.info(
-        f"[ASAP] attn rank ready: replica={parallel.dp_rank or 0} "
+        f"[ASAP] attn rank ready: "
+        f"replica={args.asap_attn_base_replica + (parallel.dp_rank or 0)} "
         f"tp_rank={parallel.tp_rank} world_size={world_size} "
         f"gpu={model_runner.gpu_id} pid={os.getpid()} "
         f"hooks={hooks.hooks_applied()} afd={is_afd_attn(args)}"
