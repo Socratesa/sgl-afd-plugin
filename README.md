@@ -23,7 +23,7 @@ SGLang 插件：prefill 阶段的 ASAP 式 Attention-FFN 分离（AFD）。
 | 模型 | 文件 |
 |---|---|
 | DeepSeek-V4-Flash（`DeepseekV4ForCausalLM`，MXFP4 专家；F 上验证过 Hopper 的 `flashinfer_mxfp4`（默认）与 `humming`） | `srt/models/deepseek_v4.py` |
-| ERNIE 5.5 Flash（`Ernie5_5_MoeForCausalLM`，FP8 block 专家或 MXFP4 专家（`quantization_config` 里 `"expert_dtype": "mxfp4"`），MXFP4 专家在 F 上用 `--moe-runner-backend deep_gemm`（W4A8）或 `flashinfer_mxfp4`（SiTU 由插件接上，见 Hook 表）；SGLang 不支持 ERNIE 的 batch overlap，A 上不开 DBO） | `srt/models/ernie55.py` |
+| ERNIE 5.5 Flash（`Ernie5_5_MoeForCausalLM`，FP8 block 专家或 MXFP4 专家（`quantization_config` 里 `"expert_dtype": "mxfp4"`），MXFP4 专家在 F 上用 `--moe-runner-backend deep_gemm`（W4A8）或 `flashinfer_mxfp4`（SiTU 由插件接上，见 Hook 表）；SGLang 没有 ERNIE 的 batch overlap，A 上的 DBO（`--enable-two-batch-overlap`）由插件的三个 hook 补上，见 Hook 表） | `srt/models/ernie55.py` |
 
 架构不在 `srt/models/` 里时，两个角色启动时都会拒绝，并列出支持的架构。
 
@@ -77,6 +77,9 @@ bash scripts/launch_asap.sh                   # 2A4F：A 在 GPU 0、1，F 在 G
 | `sglang.srt.arg_groups.validation_hook.check_two_batch_overlap` | REPLACE | attn（AFD） | 放行 `--enable-two-batch-overlap`：没有 EP a2a 时 SGLang 要求 attention DP，A 副本不需要 |
 | `sglang.srt.model_executor.model_runner.ModelRunner._prepare_eager_forward_batch` | AFTER | attn（AFD） | 开 `--enable-two-batch-overlap` 时在本副本内拆分 prefill 批（SGLang 只在 attention-DP 同步里拆） |
 | `sglang.srt.batch_overlap.operations_strategy._compute_moe_deepseek_v4_layer_operations_strategy_tbo` | AROUND | attn（AFD） | `AsapMoE` 层的 TBO 操作：attention → 发送 → shared experts ─让出─ 等回复 → 相加 |
+| `sglang.srt.arg_groups.model_overrides.ernie55._validate_features` | AROUND | attn（AFD） | SGLang 对 ERNIE 拒绝 `--enable-two-batch-overlap`，理由是 attention 模块把输出 gate 暂存在模块上（q 投影之后、被取走之前），第二个 micro-batch 在此期间进入同一个模块会冲掉它。插件的 attention 是一个操作，两个 micro-batch 不会在模块里相遇，所以检查时把该开关当作关闭；其余检查照常，`--enable-single-batch-overlap` 仍被拒绝 |
+| `sglang.srt.batch_overlap.operations_strategy.OperationsStrategy.init_new_tbo` | AROUND | attn（AFD） | SGLang 只给它认识的层类建 TBO 操作，其余抛 `NotImplementedError`：为 `Ernie5_5DecoderLayer` 补上。MoE 层与 DeepSeek-V4 同一个边界：mHC+attention → router、top-k、`fc1_latent_proj`、发送、shared experts ─让出─ 等回复 → `latent_norm`、`fc2_latent_proj`、加 shared → mHC；前 `first_k_dense_replace` 个稠密层没有边界，跑在相邻层的 stage 里 |
+| `sglang.srt.models.ernie55.Ernie5_5Model.forward` | AROUND | attn（AFD） | 被拆成两个 micro-batch 的 prefill 批把各层当作重叠的操作来跑（对应 `DeepseekV4Model._forward_layers_tbo`），embedding 与层后的 hc_head、norm 同 SGLang；其他批走原函数。不用 `DeepseekV4Model._can_run_tbo` 的路径检查：SGLang 把它限于 EP all-to-all 或 attention DP，A 副本两者都没有 |
 | `sglang.srt.entrypoints.http_server.launch_server` | REPLACE | ffn | 只拉 scheduler rank 和 `/health` |
 | `sglang.srt.managers.scheduler.Scheduler` | REPLACE（类） | ffn | 换成 `FfnScheduler` |
 | `sglang.srt.layers.quantization.mxfp4_flashinfer_trtllm_moe.Mxfp4FlashinferTrtllmMoEMethod.apply` | AROUND | ffn | SGLang 的这个 MXFP4 方法（fp8 配置加 MXFP4 专家，DSV4 与 ERNIE FP4 checkpoint 的格式）把激活写死成 SwiGLU，不读 `moe_runner_config.activation`，ERNIE 的 SiTU 专家会静默算错。激活为 `situ` 时改调 FlashInfer 的 SiTU kernel（`gemm1_alpha` = SiTU 的 beta，`gemm1_beta` = linear_beta，标准 top-k、MXFP8 激活）；其他激活原样走原函数，DSV4 不受影响。权重排布不用改 |

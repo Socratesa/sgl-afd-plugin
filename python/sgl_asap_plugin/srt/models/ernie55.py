@@ -1,6 +1,6 @@
 """ERNIE 5.5 Flash on an ASAP FFN rank.
 
-The attention ranks run SGLang's ``Ernie5_5_MoeForCausalLM`` unchanged: every MoE
+The attention ranks run SGLang's ``Ernie5_5_MoeForCausalLM``: every MoE
 layer's ``Ernie5_5Moe`` keeps its router, latent projections and shared expert and
 gets ``AsapMoE`` for the routed experts, which run in the ``moe_latent_size`` space.
 An FFN rank builds only those routed experts: the ``mlp.experts`` that
@@ -8,6 +8,10 @@ An FFN rank builds only those routed experts: the ``mlp.experts`` that
 (``model.layers.{i}.mlp.experts.*``, the layers from ``first_k_dense_replace`` on).
 The checkpoint therefore loads through SGLang's own expert loader and ``FusedMoE``
 weight loaders, and the quant method prepares the experts as it does colocated.
+
+SGLang has no two-batch overlap for ERNIE: ``forward`` below hooks
+``Ernie5_5Model.forward`` of an attention rank to run the layers of a split prefill
+batch as the operations of ``srt/batch_overlap/operations_strategy.py``.
 """
 
 from __future__ import annotations
@@ -133,3 +137,103 @@ class ExpertWeightLoader(ernie55.Ernie5_5WeightLoader):
 
 
 EntryClass = [Ernie5_5_MoeForCausalLM]
+
+
+def forward(
+    original,
+    self,
+    input_ids,
+    positions,
+    forward_batch,
+    input_embeds=None,
+    pp_proxy_tensors=None,
+):
+    """AROUND ``Ernie5_5Model.forward`` on an attention rank whose experts run on the
+    FFN ranks. A prefill batch that was split into two micro-batches
+    (``--enable-two-batch-overlap``) runs its layers as overlapped operations, as
+    ``DeepseekV4Model._forward_layers_tbo`` does for DeepSeek-V4; any other batch takes
+    SGLang's path. The embedding and the head after the layers are SGLang's own
+    (``Ernie5_5Model.forward`` with one pipeline stage and no DSpark capture)."""
+    if not _can_run_tbo(self, forward_batch):
+        return original(
+            self, input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors
+        )
+    from sglang.srt.layers.layernorm import exact_rms_norm
+
+    hidden_states = (
+        self.embed_tokens(input_ids) if input_embeds is None else input_embeds
+    )
+    hidden_states = (
+        hidden_states.unsqueeze(1).expand(-1, self.config.hc_mult, -1).contiguous()
+    )
+    hidden_states = _forward_layers_tbo(self, positions, hidden_states, forward_batch)
+    pre_hc_head = hidden_states.flatten(1)
+    rows = ernie55.logits_rows(forward_batch) if hidden_states.shape[0] > 0 else None
+    hidden_states = self.hc_head(hidden_states if rows is None else hidden_states[rows])
+    hidden_states = exact_rms_norm(hidden_states, self.norm)
+    if rows is not None:
+        hidden_states = ernie55.scatter_rows(hidden_states, rows, pre_hc_head.shape[0])
+    return hidden_states, pre_hc_head, []
+
+
+def _can_run_tbo(model, forward_batch) -> bool:
+    """The gate of ``DeepseekV4Model._can_run_tbo`` without its path check. SGLang
+    overlaps only an EP all-to-all or the attention-DP gather; the transfer to the FFN
+    ranks, which this overlaps, is neither."""
+    from sglang.srt.layers.cp.utils import is_cp_active
+    from sglang.srt.layers.moe import is_tbo_enabled
+
+    return (
+        is_tbo_enabled()
+        and forward_batch.can_run_tbo
+        and forward_batch.tbo_children is not None
+        and forward_batch.global_forward_mode is not None
+        # Target-verify also reports is_extend(); only a real prefill is overlapped.
+        and forward_batch.global_forward_mode.is_extend_without_speculative()
+        and not is_cp_active(forward_batch)
+        and model.pp_group.world_size == 1
+        and not model.dspark_layers_to_capture
+    )
+
+
+def _forward_layers_tbo(model, positions, hidden_states, forward_batch):
+    import torch
+    from sglang.srt.batch_overlap.operations import execute_overlapped_operations
+    from sglang.srt.batch_overlap.operations_strategy import OperationsStrategy
+    from sglang.srt.batch_overlap.two_batch_overlap import (
+        _model_forward_filter_inputs,
+        _model_forward_tbo_merge_key,
+    )
+    from sglang.srt.utils import BumpAllocator
+
+    layers = [model.layers[i] for i in range(model.start_layer, model.end_layer)]
+    strategy = OperationsStrategy.init_new_tbo(
+        layers, forward_batch.global_forward_mode
+    )
+    # Sized as for a whole batch, twice over: both micro-batches take from it.
+    zero_allocator = BumpAllocator(
+        buffer_size=2 * 2 * len(layers),
+        dtype=torch.float32,
+        device=hidden_states.device,
+    )
+    inputs_arr = [
+        dict(
+            **_model_forward_filter_inputs(
+                hidden_states=hidden_states,
+                residual=None,
+                positions=positions,
+                output_forward_batch=child,
+                tbo_subbatch_index=index,
+            ),
+            zero_allocator=zero_allocator,
+        )
+        for index, child in enumerate(forward_batch.tbo_children)
+    ]
+    outputs = execute_overlapped_operations(
+        inputs_arr=inputs_arr,
+        operations_arr=[strategy.operations] * 2,
+        delta_stages=[0, strategy.tbo_delta_stages],
+    )
+    return _model_forward_tbo_merge_key(
+        outputs[0], outputs[1], "hidden_states", hidden_states.shape[0]
+    )

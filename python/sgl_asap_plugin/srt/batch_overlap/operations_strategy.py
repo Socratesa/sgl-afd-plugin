@@ -16,6 +16,11 @@ stays on the compute stream, which reaches it after the other micro-batch's
 attention. On the send stream it would queue behind the other micro-batch's next
 send, which cannot start before the attention that produces its input, so an answer
 that has arrived would wait for those copies. Micro-batch i uses transport slot i.
+
+ERNIE 5.5 has no TBO operations in SGLang: ``OperationsStrategy.init_new_tbo`` (AROUND)
+adds them, with the same stage boundary. Its layers, MoE and dense, are one operation
+chain per micro-batch (``Ernie55LayerOperations``); the dense layers have no boundary
+and run inside the stage of the layer next to them.
 """
 
 from __future__ import annotations
@@ -113,3 +118,172 @@ class AsapMoeOperations:
         ):
             output += shared
         state.hidden_states_mlp_output = output
+
+
+def init_new_tbo(original, layers, forward_mode):
+    """AROUND ``OperationsStrategy.init_new_tbo``, which names the layer classes SGLang
+    has TBO operations for and raises NotImplementedError for any other: the operations
+    of an ERNIE 5.5 prefill."""
+    from sglang.srt.batch_overlap.operations_strategy import OperationsStrategy
+    from sglang.srt.models.ernie55 import Ernie5_5DecoderLayer
+
+    if not isinstance(layers[0], Ernie5_5DecoderLayer):
+        return original(layers, forward_mode)
+    return OperationsStrategy.concat(
+        [
+            _compute_ernie55_layer_operations_strategy_tbo(layer, forward_mode)
+            for layer in layers
+        ]
+    )
+
+
+def _compute_ernie55_layer_operations_strategy_tbo(layer, forward_mode):
+    from sglang.srt.batch_overlap import operations
+    from sglang.srt.batch_overlap.operations_strategy import OperationsStrategy
+    from sglang.srt.model_executor.forward_batch_info import ForwardMode
+    from sglang.srt.models.ernie55 import Ernie5_5Moe
+
+    from sgl_asap_plugin.srt.layers.moe.token_dispatcher.asap import AsapDispatcher
+
+    if forward_mode != ForwardMode.EXTEND:
+        raise NotImplementedError(
+            f"ERNIE 5.5 TBO only supports prefill (EXTEND), got {forward_mode=}"
+        )
+    ops = Ernie55LayerOperations(layer)
+    attention = [ops.op_prepare_attn, ops.op_attn, ops.op_post_attn_pre_mlp]
+    if not isinstance(layer.mlp, Ernie5_5Moe):
+        ffn = [ops.op_dense_mlp]
+    elif isinstance(layer.mlp.experts.dispatcher, AsapDispatcher):
+        ffn = [ops.op_asap_dispatch, operations.YieldOperation(), ops.op_asap_combine]
+    else:
+        raise NotImplementedError(
+            "ERNIE 5.5 TBO needs the routed experts on the FFN ranks (--asap-ffn-size)"
+        )
+    return OperationsStrategy(
+        operations=[*attention, *ffn, ops.op_postprocess], tbo_delta_stages=0
+    )
+
+
+class Ernie55LayerOperations:
+    """One ``Ernie5_5DecoderLayer`` as TBO operations, with the arithmetic of
+    ``Ernie5_5DecoderLayer.forward`` and, for a MoE layer, of ``Ernie5_5Moe.forward``
+    split at the routed experts. Attention is a single operation: an attention module
+    keeps its output gate on itself from the q projection until the gate is taken, and
+    a second micro-batch entering the module in between would clobber it (SGLang's
+    reason for refusing TBO for ERNIE). The only stage boundary is after the send."""
+
+    def __init__(self, layer):
+        self.layer = layer
+
+    def op_prepare_attn(
+        self,
+        state,
+        positions,
+        hidden_states,
+        forward_batch,
+        tbo_subbatch_index,
+        zero_allocator,
+        **kwargs,
+    ):
+        layer = self.layer
+        x, post, comb = layer._hc_pre(
+            hidden_states,
+            layer.hc_attn_fn,
+            layer.hc_attn_scale,
+            layer.hc_attn_base,
+            layer.input_layernorm,
+        )
+        state.update(
+            dict(
+                positions=positions,
+                forward_batch=forward_batch,
+                tbo_subbatch_index=tbo_subbatch_index,
+                zero_allocator=zero_allocator,
+                attn_input=x,
+                attn_residual=(hidden_states, post, comb),
+            )
+        )
+
+    def op_attn(self, state):
+        from sglang.srt.models.ernie55 import Ernie5_5MlaAttention
+
+        layer, x = self.layer, state.pop("attn_input")
+        if isinstance(layer.self_attn, Ernie5_5MlaAttention):
+            x = layer.self_attn(
+                state.positions, x, state.forward_batch, state.zero_allocator
+            )
+        else:
+            x = layer.self_attn(x, state.positions, state.forward_batch)
+        state.attn_output = x
+
+    def op_post_attn_pre_mlp(self, state):
+        layer = self.layer
+        hidden_states, post, comb = state.pop("attn_residual")
+        hidden_states = layer._hc_post(
+            state.pop("attn_output"), hidden_states, post, comb
+        )
+        x, post, comb = layer._hc_pre(
+            hidden_states,
+            layer.hc_ffn_fn,
+            layer.hc_ffn_scale,
+            layer.hc_ffn_base,
+            layer.post_attention_layernorm,
+        )
+        state.hidden_states_mlp_input = x
+        state.ffn_residual = (hidden_states, post, comb)
+
+    def op_dense_mlp(self, state):
+        state.hidden_states_mlp_output = self.layer._forward_ffn(
+            state.pop("hidden_states_mlp_input"), state.forward_batch
+        )
+
+    def op_asap_dispatch(self, state):
+        """Router and top-k, the latent projection, the send to the FFN ranks, then the
+        shared experts, which run while the FFN ranks compute."""
+        from sglang.kernels.ops.gemm.bf16_fp32 import linear_bf16_fp32
+
+        mlp, x = self.layer.mlp, state.pop("hidden_states_mlp_input")
+        if x.shape[0] == 0:
+            # As Ernie5_5Moe.forward: nothing to route, nothing sent.
+            state.asap_dispatch, state.asap_shared = None, x
+            return
+        topk_output = mlp.topk(x, linear_bf16_fp32(x, mlp.gate_weight))
+        latent, _ = mlp.fc1_latent_proj(x)
+        state.asap_dispatch = mlp.experts.dispatcher.dispatch(
+            latent, topk_output, micro_batch=state.tbo_subbatch_index
+        )
+        state.asap_shared = mlp.shared_experts(x)
+
+    def op_asap_combine(self, state):
+        """Wait for the FFN ranks' answer, project it back and add the shared experts."""
+        mlp = self.layer.mlp
+        dispatch, shared = state.pop("asap_dispatch"), state.pop("asap_shared")
+        if dispatch is None:
+            state.hidden_states_mlp_output = shared
+            return
+        routed = mlp.experts.dispatcher.combine(dispatch)
+        routed, _ = mlp.fc2_latent_proj(mlp.latent_norm(routed))
+        state.hidden_states_mlp_output = routed + shared
+
+    def op_postprocess(self, state):
+        layer = self.layer
+        hidden_states, post, comb = state.pop("ffn_residual")
+        hidden_states = layer._hc_post(
+            state.pop("hidden_states_mlp_output"), hidden_states, post, comb
+        )
+        output = dict(
+            positions=state.positions,
+            hidden_states=hidden_states,
+            forward_batch=state.forward_batch,
+            tbo_subbatch_index=state.tbo_subbatch_index,
+            zero_allocator=state.zero_allocator,
+        )
+        state.clear(
+            expect_keys={
+                "positions",
+                "forward_batch",
+                "tbo_subbatch_index",
+                "zero_allocator",
+            }
+        )
+        return output

@@ -88,9 +88,13 @@ def register_role_hooks(args: Asap) -> None:
         )
         if not is_afd_attn(args):
             return
+        from sgl_asap_plugin.srt.arg_groups.model_overrides import (
+            ernie55 as ernie55_overrides,
+        )
         from sgl_asap_plugin.srt.batch_overlap import operations_strategy
         from sgl_asap_plugin.srt.layers.moe.ep_moe import layer
         from sgl_asap_plugin.srt.managers import scheduler
+        from sgl_asap_plugin.srt.models import ernie55 as ernie55_model
 
         _register(
             "sglang.srt.layers.moe.ep_moe.layer.get_moe_impl_class",
@@ -119,6 +123,23 @@ def register_role_hooks(args: Asap) -> None:
             "sglang.srt.batch_overlap.operations_strategy."
             "_compute_moe_deepseek_v4_layer_operations_strategy_tbo",
             operations_strategy._compute_moe_deepseek_v4_layer_operations_strategy_tbo,
+            HookType.AROUND,
+        )
+        # SGLang has no two-batch overlap for ERNIE 5.5: these three add it.
+        _register(
+            "sglang.srt.arg_groups.model_overrides.ernie55._validate_features",
+            ernie55_overrides._validate_features,
+            HookType.AROUND,
+        )
+        _register(
+            "sglang.srt.batch_overlap.operations_strategy."
+            "OperationsStrategy.init_new_tbo",
+            operations_strategy.init_new_tbo,
+            HookType.AROUND,
+        )
+        _register(
+            "sglang.srt.models.ernie55.Ernie5_5Model.forward",
+            ernie55_model.forward,
             HookType.AROUND,
         )
         weight_utils.skip_routed_experts()
