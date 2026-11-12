@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from sglang.srt.layers.moe.topk import TopKOutput
 
 
-def get_moe_impl_class(quant_config=None):
+def get_moe_impl_class(quant_config=None, *, context=None):
     """REPLACE of ``sglang.srt.layers.moe.ep_moe.layer.get_moe_impl_class``."""
     return AsapMoE
 

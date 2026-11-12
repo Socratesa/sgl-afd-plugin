@@ -1,6 +1,7 @@
 """Models with ASAP support, one module per family as in ``sglang.srt.models``.
 
 * ``deepseek_v4.py``: ``DeepseekV4ForCausalLM`` (DeepSeek-V4-Flash)
+* ``ernie55.py``: ``Ernie5_5_MoeForCausalLM`` (ERNIE 5.5 Flash)
 
 A module defines, under the architecture name of the checkpoint (``EntryClass``), the
 model an FFN rank builds: the routed experts of every MoE layer and nothing else. The

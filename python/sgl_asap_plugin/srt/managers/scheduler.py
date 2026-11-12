@@ -189,6 +189,7 @@ class FfnScheduler(Scheduler):
         self.max_req_input_len = 0
         self.init_ffn_server()
         self.init_metrics_reporter()
+        self.async_d2h_worker = None  # read by run_scheduler_process on exit
         self.gracefully_exit = False
         self.is_initializing = False
         self.init_startup_timing_summary()
@@ -344,7 +345,8 @@ class FfnScheduler(Scheduler):
             topk_weights = torch.rand(n, first.top_k, device=device, generator=gen)
             topk_output = StandardTopKOutput(topk_weights, topk_ids, None)
             for layer_id in layers[:1] if n > 256 else layers:
-                self.experts[layer_id](x, topk_output)
+                # x.clone(): deep_gemm frees its input (dispose_tensor)
+                self.experts[layer_id](x.clone(), topk_output)
         torch.cuda.synchronize()
         return buckets
 

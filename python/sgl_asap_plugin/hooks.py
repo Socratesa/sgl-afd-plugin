@@ -2,11 +2,11 @@
 
 A hook body lives in the module of this package at the path of the SGLang module it
 hooks: ``sglang.srt.X.f`` is hooked by ``sgl_asap_plugin.srt.X.f``. Every process
-gets the base hooks, which add the ``--asap-*`` flags. The launcher registers the
-role's hooks once it has parsed them, before ServerArgs resolution; the processes it
-starts register them from the exported ``ASAP_*`` environment. SGLang's plugin
-loader only logs a hook that fails to apply, so the launcher checks that every hook
-of the role was applied.
+gets the base hooks, which add the ``--asap-*`` flags and detect the FP4 experts of
+ERNIE 5.5. The launcher registers the role's hooks once it has parsed them, before
+ServerArgs resolution; the processes it starts register them from the exported
+``ASAP_*`` environment. SGLang's plugin loader only logs a hook that fails to apply,
+so the launcher checks that every hook of the role was applied.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ def _register(target: str, hook, hook_type: HookType) -> None:
 
 def register_base_hooks() -> None:
     from sgl_asap_plugin.srt import server_args
+    from sgl_asap_plugin.srt.configs import model_config
 
     _register(
         "sglang.srt.server_args.ServerArgs.add_cli_args",
@@ -45,6 +46,12 @@ def register_base_hooks() -> None:
         "sglang.srt.server_args.ServerArgs.from_cli_args",
         server_args.from_cli_args,
         HookType.BEFORE,
+    )
+    # ERNIE 5.5 FP4 experts, colocated as well as on the FFN ranks.
+    _register(
+        "sglang.srt.configs.model_config.ModelConfig.__init__",
+        model_config.init,
+        HookType.AFTER,
     )
 
 

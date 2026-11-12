@@ -23,7 +23,7 @@ from sgl_asap_plugin.transport.layout import Geometry
 logger = logging.getLogger(__name__)
 
 ENV_ROLE = "ASAP_ROLE"
-TESTED_SGLANG = ("0.5.22",)
+TESTED_SGLANG = ("0.5.24.dev1296+g0bf026b1b",)
 
 _asap_args: Optional[Asap] = None
 

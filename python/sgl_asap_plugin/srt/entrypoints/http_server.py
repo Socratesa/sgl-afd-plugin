@@ -24,11 +24,12 @@ def launch_server(server_args, *args, **kwargs) -> None:
     ``Engine._launch_subprocesses`` up to the scheduler launch, then what it does on a
     node with ``--node-rank >= 1``."""
     from sglang.srt.entrypoints.engine import Engine, _set_envs_and_config
+    from sglang.srt.entrypoints.server_utils import launch_dummy_health_check_server
     from sglang.srt.managers.scheduler import run_scheduler_process
     from sglang.srt.plugins import load_plugins
     from sglang.srt.runtime_context import get_observability, get_serving, publish
     from sglang.srt.server_args import PortArgs
-    from sglang.srt.utils import configure_logger, launch_dummy_health_check_server
+    from sglang.srt.utils import configure_logger
 
     from sgl_asap_plugin.srt.server_args import get_asap_args
 

@@ -21,9 +21,9 @@ from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.utils import RoutingMethodType
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.layers.utils.common import add_prefix
 from sglang.srt.model_loader.utils import maybe_executor_submit, should_async_load
 from sglang.srt.models import deepseek_v4
-from sglang.srt.utils import add_prefix
 from torch import nn
 
 logger = logging.getLogger(__name__)
