@@ -99,6 +99,7 @@ if [ "$ROLE" != attn ]; then
     --moe-runner-backend flashinfer_mxfp4 \
     --asap-role ffn --asap-attn-dp-size "$D_TOTAL" --asap-attn-tp-size 1 \
     --asap-bootstrap-addr "$BOOTSTRAP" "${TRANSPORT_ARGS[@]}" \
+    --trust-remote-code \
     ${F_EXTRA:-}
   PIDS+=($!) NAMES+=(F) LOGS+=("$LOG_DIR/ffn.log")
   echo "F: $E ranks on $HOST GPUs $F_CSV -> $LOG_DIR/ffn.log (pid $!)"
@@ -127,6 +128,7 @@ if [ "$ROLE" != ffn ]; then
     --tokenizer-worker-num 32 \
     --detokenizer-worker-num 16 \
     --tokenizer-backend fastokens \
+    --trust-remote-code \
     ${A_EXTRA:-}
   PIDS+=($!) NAMES+=("A$A_TAG") LOGS+=("$LOG_DIR/attn$A_TAG.log") URLS+=("http://$HOST:30000")
   echo "A$A_TAG: replicas $A_BASE-$((A_BASE + D - 1)) of $D_TOTAL on $HOST GPUs $A_CSV -> $LOG_DIR/attn$A_TAG.log (pid $!)"

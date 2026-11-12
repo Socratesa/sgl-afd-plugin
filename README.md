@@ -20,10 +20,10 @@ SGLang 插件：prefill 阶段的 ASAP 式 Attention-FFN 分离（AFD）。
 
 ## 支持的模型
 
-| 模型 | 文件 | 验证 |
-|---|---|---|
-| DeepSeek-V4-Flash（`DeepseekV4ForCausalLM`，MXFP4 专家；F 上验证过 Hopper 的 `flashinfer_mxfp4`（默认）与 `humming`） | `srt/models/deepseek_v4.py` | 全量 e2e，见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) |
-| ERNIE 5.5 Flash（`Ernie5_5_MoeForCausalLM`，FP8 block 专家或 MXFP4 专家（`quantization_config` 里 `"expert_dtype": "mxfp4"`），MXFP4 专家在 F 上用 `--moe-runner-backend deep_gemm`（W4A8）；SGLang 不支持 ERNIE 的 batch overlap，A 上不开 DBO） | `srt/models/ernie55.py` | 待验证 |
+| 模型 | 文件 |
+|---|---|
+| DeepSeek-V4-Flash（`DeepseekV4ForCausalLM`，MXFP4 专家；F 上验证过 Hopper 的 `flashinfer_mxfp4`（默认）与 `humming`） | `srt/models/deepseek_v4.py` |
+| ERNIE 5.5 Flash（`Ernie5_5_MoeForCausalLM`，FP8 block 专家或 MXFP4 专家（`quantization_config` 里 `"expert_dtype": "mxfp4"`），MXFP4 专家在 F 上用 `--moe-runner-backend deep_gemm`（W4A8）或 `flashinfer_mxfp4`（SiTU 由插件接上，见 Hook 表）；SGLang 不支持 ERNIE 的 batch overlap，A 上不开 DBO） | `srt/models/ernie55.py` |
 
 架构不在 `srt/models/` 里时，两个角色启动时都会拒绝，并列出支持的架构。
 
@@ -79,6 +79,7 @@ bash scripts/launch_asap.sh                   # 2A4F：A 在 GPU 0、1，F 在 G
 | `sglang.srt.batch_overlap.operations_strategy._compute_moe_deepseek_v4_layer_operations_strategy_tbo` | AROUND | attn（AFD） | `AsapMoE` 层的 TBO 操作：attention → 发送 → shared experts ─让出─ 等回复 → 相加 |
 | `sglang.srt.entrypoints.http_server.launch_server` | REPLACE | ffn | 只拉 scheduler rank 和 `/health` |
 | `sglang.srt.managers.scheduler.Scheduler` | REPLACE（类） | ffn | 换成 `FfnScheduler` |
+| `sglang.srt.layers.quantization.mxfp4_flashinfer_trtllm_moe.Mxfp4FlashinferTrtllmMoEMethod.apply` | AROUND | ffn | SGLang 的这个 MXFP4 方法（fp8 配置加 MXFP4 专家，DSV4 与 ERNIE FP4 checkpoint 的格式）把激活写死成 SwiGLU，不读 `moe_runner_config.activation`，ERNIE 的 SiTU 专家会静默算错。激活为 `situ` 时改调 FlashInfer 的 SiTU kernel（`gemm1_alpha` = SiTU 的 beta，`gemm1_beta` = linear_beta，标准 top-k、MXFP8 激活）；其他激活原样走原函数，DSV4 不受影响。权重排布不用改 |
 | `sglang.srt.model_loader.weight_utils.buffered_multi_thread_safetensors_weights_iterator` | AROUND | attn（AFD）, ffn | 本角色不加载的张量不读：A 不读路由专家（166.9 GB 里的约 147 GB），F rank f 只读自己的路由专家 |
 | `sglang.srt.model_loader.weight_utils.safetensors_weights_iterator` | AROUND | attn（AFD）, ffn | 同上，单线程路径 |
 

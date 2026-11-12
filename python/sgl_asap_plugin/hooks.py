@@ -124,8 +124,16 @@ def register_role_hooks(args: Asap) -> None:
         weight_utils.skip_routed_experts()
     else:
         from sgl_asap_plugin.srt.entrypoints import http_server
+        from sgl_asap_plugin.srt.layers.quantization import mxfp4_flashinfer_trtllm_moe
         from sgl_asap_plugin.srt.managers import scheduler
 
+        # ERNIE 5.5's SiTU on flashinfer_mxfp4; inert for any other activation.
+        _register(
+            "sglang.srt.layers.quantization.mxfp4_flashinfer_trtllm_moe."
+            "Mxfp4FlashinferTrtllmMoEMethod.apply",
+            mxfp4_flashinfer_trtllm_moe.apply,
+            HookType.AROUND,
+        )
         _register(
             "sglang.srt.entrypoints.http_server.launch_server",
             http_server.launch_server,
