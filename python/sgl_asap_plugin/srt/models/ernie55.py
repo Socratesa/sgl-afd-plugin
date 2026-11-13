@@ -177,23 +177,9 @@ def forward(
 
 
 def _can_run_tbo(model, forward_batch) -> bool:
-    """The gate of ``DeepseekV4Model._can_run_tbo`` without its path check. SGLang
-    overlaps only an EP all-to-all or the attention-DP gather; the transfer to the FFN
-    ranks, which this overlaps, is neither."""
-    from sglang.srt.layers.cp.utils import is_cp_active
-    from sglang.srt.layers.moe import is_tbo_enabled
+    from sgl_asap_plugin.srt.batch_overlap.two_batch_overlap import can_run_tbo
 
-    return (
-        is_tbo_enabled()
-        and forward_batch.can_run_tbo
-        and forward_batch.tbo_children is not None
-        and forward_batch.global_forward_mode is not None
-        # Target-verify also reports is_extend(); only a real prefill is overlapped.
-        and forward_batch.global_forward_mode.is_extend_without_speculative()
-        and not is_cp_active(forward_batch)
-        and model.pp_group.world_size == 1
-        and not model.dspark_layers_to_capture
-    )
+    return can_run_tbo(model, forward_batch) and not model.dspark_layers_to_capture
 
 
 def _forward_layers_tbo(model, positions, hidden_states, forward_batch):

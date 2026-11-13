@@ -4,9 +4,9 @@
 # /health, then start the smg router (:20010) over the A instances. Ctrl-C, or any instance exiting, stops all of them.
 #   bash scripts/run_asap_cross.sh                                 # 4A2F: A on GPUs 0-3 here, F on GPUs 0-1 of F_HOST
 #   A_GPUS="0 1" F_GPUS="0 1 2 3" bash scripts/run_asap_cross.sh   # 2A4F
-#   F_HOST=10.99.91.3 bash scripts/run_asap_cross.sh               # default: the first host of the hostfile that is not this one
-#   A_HOSTS="10.99.91.2:0,1,2,3 10.99.91.4:0,1,2,3" bash scripts/run_asap_cross.sh   # 8A2F: A instances on two trays
-#   A_HOSTS="10.99.91.2:0,1,2,3 10.99.91.3:2,3" bash scripts/run_asap_cross.sh       # 6A2F: one of them next to F
+#   F_HOST=ip2 bash scripts/run_asap_cross.sh                              # default: the first host of the hostfile that is not this one
+#   A_HOSTS="ip1:0,1,2,3 ip3:0,1,2,3" bash scripts/run_asap_cross.sh       # 8A2F: A instances on two trays
+#   A_HOSTS="ip1:0,1,2,3 ip2:2,3" bash scripts/run_asap_cross.sh           # 6A2F: one of them next to F
 #   TRANSPORT_MEM=auto bash scripts/run_asap_cross.sh              # --asap-transport-mem of every instance, default fabric
 #   DBO, PER_DP_CHUNK, PREFILL_MAX_RUNNING, A_EXTRA, F_EXTRA, LOG_DIR: as in run_asap.sh
 # Everything but the placement (hosts, GPUs, bootstrap address, replica numbers, transport memory) is run_asap.sh's.
@@ -19,8 +19,7 @@
 # Needs (../net/README.md section 6): every tray in one NVLink domain (nvidia-smi -q, Fabric: same ClusterUUID and
 # CliqueId), an IMEX channel in each container (/dev/nvidia-caps-imex-channels), ssh without a password to every
 # other tray (SSH_PORT, default 2222; ~/.ssh/config can override it), and MODEL at the same path on each
-# (/root/paddlejob/workspace is a local
-# disk). The venv, the plugin and LOG_DIR are on the shared /root/paddlejob/inference-public, so all logs land here:
+# (often a local disk). The venv, the plugin and LOG_DIR are on shared storage, so all logs land here:
 # launch_F.log, launch_A<i>.log (what each run_asap.sh prints) next to ffn.log, attn<i>.log, pd_router.log.
 #
 # Ports: A http HOST:30000 | A replica r process group 9500+r | F /health F_HOST:30100 | F process group 9590 |
@@ -36,10 +35,10 @@ source "$SCRIPT_DIR/lib.sh"
 RUN=$SCRIPT_DIR/run_asap.sh
 FORWARD=(VENV MODEL DBO PER_DP_CHUNK PREFILL_MAX_RUNNING A_EXTRA F_EXTRA LAUNCH_WRAP METRIC_MODEL)
 
-VENV=${VENV:-/root/paddlejob/inference-public/lihaode/sgl_afd/.venv}
-MODEL=${MODEL:-/root/paddlejob/workspace/models/DeepSeek-V4-Flash-0731}
+VENV=${VENV:-/path/to/venv}
+MODEL=${MODEL:-/path/to/model}
 if [ -z "${F_HOST:-}" ]; then
-  for h in $(awk '{print $1}' "${HOSTFILE:-/root/paddlejob/workspace/hostfile}"); do
+  for h in $(hostfile_trays); do
     is_local "$h" || { F_HOST=$h; break; }
   done
 fi

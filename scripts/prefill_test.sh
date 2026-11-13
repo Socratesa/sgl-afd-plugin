@@ -10,7 +10,7 @@
 #   bash scripts/prefill_test.sh                          # DEFAULT_GROUPS, in this order
 #   bash scripts/prefill_test.sh asap_2a2f baseline_ep4   # these groups, in this order
 #   bash scripts/prefill_test.sh list                     # every group
-#   BENCH=/root/paddlejob/inference-public/lihaode/sgl_afd/bench-qf/bench-mini.sh bash scripts/prefill_test.sh   # smoke test: 1 session
+#   BENCH=/path/to/bench-mini.sh bash scripts/prefill_test.sh   # smoke test: 1 session
 # Per group, everything lands in $LOG_ROOT/prefill_<group>_<time>/: launch.log, ffn.log/attn.log or baseline_*.log,
 # pd_router.log, req.log, bench.log (the cross/pair launchers add launch_*.log). '*' in a group name is x in file names.
 # The bench results go to bench-qf/results-t6t7/<time>_<group>-qf (see bench.log).
@@ -20,12 +20,13 @@
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
-BENCH=${BENCH:-/root/paddlejob/inference-public/lihaode/sgl_afd/bench-qf/bench-qf-new-t6t7.sh}
+BENCH=${BENCH:-/path/to/bench.sh}
 LOG_ROOT=${LOG_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)/logs}
 READY_TIMEOUT=${READY_TIMEOUT:-1800}
-# DEFAULT_GROUPS=(asap_6a2f asap_4a2f 'baseline_ep4*2' baseline_ep4 asap_2a2f baseline_ep8 )
+# DEFAULT_GROUPS=(asap_6a2f asap_4a2f 'baseline_ep4*2' baseline_ep4 asap_2a2f baseline_ep8)
+DEFAULT_GROUPS=(asap_6a2f asap_4a2f 'baseline_ep4*2')
 # DEFAULT_GROUPS=(asap_6a2f asap_4a2f asap_2a2f baseline_ep8)
-DEFAULT_GROUPS=(baseline_ep4_megamoe 'baseline_ep4*2_megamoe'  baseline_ep8_megamoe)
+# DEFAULT_GROUPS=(baseline_ep4_megamoe 'baseline_ep4*2_megamoe'  baseline_ep8_megamoe)
 ALL_GROUPS=(baseline_ep4 'baseline_ep4*2' baseline_ep8 baseline_ep4_megamoe 'baseline_ep4*2_megamoe'  baseline_ep8_megamoe asap_6a2f asap_4a2f asap_2a2f)
 mkdir -p "$LOG_ROOT"
 DRIVER_LOG=$LOG_ROOT/prefill_test_$(date +%Y%m%d-%H%M%S).log

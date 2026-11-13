@@ -7,6 +7,9 @@ the ``mlp.experts`` that ``DeepseekV2MoE`` creates, with the same arguments, und
 the same parameter names (``model.layers.{i}.mlp.experts.*``). The checkpoint
 therefore loads through SGLang's own name mapping and ``FusedMoE`` weight loaders,
 and the quant method prepares the experts as it does colocated.
+
+``_can_run_tbo`` below hooks ``DeepseekV4Model`` of an attention rank, for two-batch
+overlap.
 """
 
 from __future__ import annotations
@@ -170,3 +173,18 @@ class DeepseekV4ForCausalLM(nn.Module):
 
 
 EntryClass = [DeepseekV4ForCausalLM]
+
+
+def _can_run_tbo(original, self, forward_batch) -> bool:
+    """AROUND ``DeepseekV4Model._can_run_tbo`` on an attention rank whose experts run on
+    the FFN ranks. SGLang allows two-batch overlap only with an EP all-to-all or with
+    attention DP, so a replica (neither) never overlapped, although
+    ``_prepare_eager_forward_batch`` split its batches. The gate is SGLang's without
+    that path check (``srt/batch_overlap/two_batch_overlap.py``). The hc scheme of
+    DeepSeek-V4.1 (``hc_pre_from_prev_sublayer``) has no TBO operations and SGLang
+    asserts against it: it keeps SGLang's answer."""
+    from sgl_asap_plugin.srt.batch_overlap.two_batch_overlap import can_run_tbo
+
+    if self.hc_pre_from_prev_sublayer:
+        return original(self, forward_batch)
+    return can_run_tbo(self, forward_batch)

@@ -3,11 +3,16 @@
 # run_asap.sh and run_ep.sh are the one-tray scripts and use launch / wait_ready / start_router; run_asap_cross.sh,
 # run_ep_cross.sh and run_ep_pair.sh run those on several trays with remote_run and start the router themselves.
 # The caller sets SCRIPT_DIR, VENV, PLUGINS and LOG_DIR before using the functions that need them.
-#
-# Profiler contract (the only thing the launchers know about nsys_wrap.sh, and it is not nsys-specific): when LAUNCH_WRAP
-# is set, `launch` runs the server as `$LAUNCH_WRAP HOST NAME -- ARGV...` on HOST, with LAUNCH_GPUS (the physical GPUs the
-# instance owns) and LAUNCH_DEPLOY (a deployment tag such as 6a2f or ep4) in its environment. NAME is the instance (F, A0,
-# A1, ..., EP, EP0, ...).
+# scripts/env (gitignored; see env.example) may set VENV, MODEL, BENCH, HOSTFILE for this cluster. Sourced in a subshell so
+# a half-filled file and its `set -u` cannot change the caller; anything already in the environment wins.
+if [ -n "${SCRIPT_DIR:-}" ] && [ -f "$SCRIPT_DIR/env" ]; then
+  # shellcheck disable=SC1091
+  eval "$(env VENV="${VENV-}" MODEL="${MODEL-}" BENCH="${BENCH-}" HOSTFILE="${HOSTFILE-}" \
+    VENV_SET="${VENV+x}" MODEL_SET="${MODEL+x}" BENCH_SET="${BENCH+x}" HOSTFILE_SET="${HOSTFILE+x}" \
+    bash -c 'missing=; for n in VENV MODEL BENCH HOSTFILE; do flag=${n}_SET; [ -n "${!flag}" ] || missing="$missing $n"; done
+    set -a; source "$1"; set +a
+    for n in $missing; do [ -z "${!n+x}" ] || printf "%s=%q\n" "$n" "${!n}"; done' _ "$SCRIPT_DIR/env")"
+fi
 
 SSH_PORT=${SSH_PORT:-2222}
 is_local() { [[ $1 == 127.0.0.1 || $1 == localhost || " $(hostname -I) " == *" $1 "* ]]; }
@@ -29,7 +34,7 @@ on_bg() {
 # hostfile_trays: the trays of the hostfile, this one first
 hostfile_trays() {
   local h trays=
-  for h in $(awk '{print $1}' "${HOSTFILE:-/root/paddlejob/workspace/hostfile}"); do
+  for h in $(awk '{print $1}' "${HOSTFILE:-/path/to/hostfile}"); do
     if is_local "$h"; then trays="$h $trays"; else trays="$trays $h"; fi
   done
   echo $trays

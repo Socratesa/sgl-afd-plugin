@@ -41,8 +41,8 @@ ROUTER=${ROUTER:-1}
 case "$ROLE" in both | attn | ffn) ;; *) echo "ROLE must be both, attn or ffn, got: $ROLE" >&2; exit 1 ;; esac
 [ "$KILL" = 0 ] || kill_servers 127.0.0.1
 
-VENV=${VENV:-/root/paddlejob/inference-public/lihaode/sgl_afd/.venv}
-MODEL=${MODEL:-/root/paddlejob/workspace/models/DeepSeek-V4-Flash-0731}
+VENV=${VENV:-/path/to/venv}
+MODEL=${MODEL:-/path/to/model}
 PLUGINS=sgl_asap_plugin
 A_GPUS=(${A_GPUS:-0 1})
 F_GPUS=(${F_GPUS:-2 3})

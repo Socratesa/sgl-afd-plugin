@@ -3,7 +3,7 @@
 # single EP group whose ranks span both trays. Here each tray is its own EP (attention DP = EP) and the router spreads
 # requests across both. Each tray is one run_ep.sh, started here or over ssh; Ctrl-C, or any engine exiting, stops all of them.
 #   bash scripts/run_ep_pair.sh                              # EP4 on every hostfile tray, router :20010 here
-#   NODES="10.99.91.63 10.99.91.59" EP=4 bash scripts/run_ep_pair.sh
+#   NODES="ip1 ip2" EP=4 bash scripts/run_ep_pair.sh         # default: every hostfile tray
 #   PER_DP_CHUNK=16384 bash scripts/run_ep_pair.sh
 #   ROUTER=0 bash scripts/run_ep_pair.sh                     # engines only; prints the smg.sh line
 #   MOE_BACKEND, PREFILL_MAX_RUNNING, EXTRA, LOG_DIR: as in run_ep.sh
@@ -19,7 +19,7 @@ source "$SCRIPT_DIR/lib.sh"
 RUN=$SCRIPT_DIR/run_ep.sh
 FORWARD=(VENV MODEL MOE_BACKEND PER_DP_CHUNK PREFILL_MAX_RUNNING EXTRA LAUNCH_WRAP METRIC_MODEL)
 
-MODEL=${MODEL:-/root/paddlejob/workspace/models/DeepSeek-V4-Flash-0731}
+MODEL=${MODEL:-/path/to/model}
 EP=${EP:-4}
 # two independent EP groups behind one router: ep4x2, not ep4. Set before NODES so a hostfile failure still leaves it set.
 METRIC_MODEL=${METRIC_MODEL:-asap_dsv4_ep${EP}x2}

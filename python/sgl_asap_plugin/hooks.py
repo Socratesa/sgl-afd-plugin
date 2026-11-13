@@ -94,6 +94,7 @@ def register_role_hooks(args: Asap) -> None:
         from sgl_asap_plugin.srt.batch_overlap import operations_strategy
         from sgl_asap_plugin.srt.layers.moe.ep_moe import layer
         from sgl_asap_plugin.srt.managers import scheduler
+        from sgl_asap_plugin.srt.models import deepseek_v4 as deepseek_v4_model
         from sgl_asap_plugin.srt.models import ernie55 as ernie55_model
 
         _register(
@@ -123,6 +124,11 @@ def register_role_hooks(args: Asap) -> None:
             "sglang.srt.batch_overlap.operations_strategy."
             "_compute_moe_deepseek_v4_layer_operations_strategy_tbo",
             operations_strategy._compute_moe_deepseek_v4_layer_operations_strategy_tbo,
+            HookType.AROUND,
+        )
+        _register(
+            "sglang.srt.models.deepseek_v4.DeepseekV4Model._can_run_tbo",
+            deepseek_v4_model._can_run_tbo,
             HookType.AROUND,
         )
         # SGLang has no two-batch overlap for ERNIE 5.5: these three add it.

@@ -5,11 +5,11 @@
 # stops all of them.
 #   bash scripts/run_ep_cross.sh                              # EP8: GPUs 0-3 here and on the other hostfile tray
 #   PER_DP_CHUNK=16384 bash scripts/run_ep_cross.sh           # 16k tokens per rank, 128k in all
-#   NODES="10.99.91.2 10.99.91.3" GPUS_PER_NODE=4 bash ...    # explicit placement, the first must be this tray
+#   NODES="ip1 ip2" GPUS_PER_NODE=4 bash ...                  # explicit placement, the first must be this tray
 #   MOE_BACKEND=flashinfer_mxfp4 bash scripts/run_ep_cross.sh
 #   MOE_BACKEND, PER_DP_CHUNK, PREFILL_MAX_RUNNING, EXTRA, LOG_DIR, ROUTER: as in run_ep.sh
 # Needs the same as run_asap_cross.sh: passwordless ssh to every other tray (SSH_PORT, default 2222), MODEL at the same path
-# on each (/root/paddlejob/workspace is a local disk); the venv, the plugin and LOG_DIR are on the shared wekafs, where
+# on each (often a local disk); the venv, the plugin and LOG_DIR are on shared storage, where
 # launch_EP<r>.log (what each run_ep.sh prints) lands next to the engine logs and pd_router.log.
 # Ports: http 127.0.0.1:30000 | torch distributed init NODE0:9580 | nccl 9590 | router 20010.
 # Like run_asap_cross.sh it first kills the sglang servers on every tray it uses. $LOG_DIR/ready appears when everything is up.
@@ -22,7 +22,7 @@ source "$SCRIPT_DIR/lib.sh"
 RUN=$SCRIPT_DIR/run_ep.sh
 FORWARD=(VENV MODEL MOE_BACKEND PER_DP_CHUNK PREFILL_MAX_RUNNING EXTRA LAUNCH_WRAP METRIC_MODEL)
 
-MODEL=${MODEL:-/root/paddlejob/workspace/models/DeepSeek-V4-Flash-0731}
+MODEL=${MODEL:-/path/to/model}
 GPUS_PER_NODE=${GPUS_PER_NODE:-4}
 NODES=(${NODES:-$(hostfile_trays)})
 N=${#NODES[@]}

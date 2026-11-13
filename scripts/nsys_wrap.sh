@@ -66,7 +66,7 @@ set -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
-VENV=${VENV:-/root/paddlejob/inference-public/lihaode/sgl_afd/.venv}
+VENV=${VENV:-/path/to/venv}
 SESSION=${NSYS_SESSION:-sgl_nsys}
 OUT=${NSYS_OUT:-$(cd "$SCRIPT_DIR/../.." && pwd)/logs/nsys}
 GPU_METRICS=${NSYS_GPU_METRICS:-1}

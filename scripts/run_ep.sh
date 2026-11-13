@@ -37,8 +37,8 @@ KILL=${KILL:-1}                      # 0: leave the sglang servers on this tray 
 ROUTER=${ROUTER:-1}
 [ "$KILL" = 0 ] || kill_servers 127.0.0.1
 
-VENV=${VENV:-/root/paddlejob/inference-public/lihaode/sgl_afd/.venv}
-MODEL=${MODEL:-/root/paddlejob/workspace/models/DeepSeek-V4-Flash-0731}
+VENV=${VENV:-/path/to/venv}
+MODEL=${MODEL:-/path/to/model}
 PLUGINS=none
 DEPLOY=ep$EP
 # Prometheus model_name: asap_dsv4_<topology>, e.g. asap_dsv4_ep4 / asap_dsv4_ep8 / asap_dsv4_ep4x2. METRIC_MODEL overrides it.
@@ -89,6 +89,7 @@ launch "$INSTANCE" "$HOST" "$DEVS" "$DEVS" "$ENGINE_LOG" \
   --detokenizer-worker-num 16 \
   --tokenizer-backend fastokens \
   --enable-dp-lm-head \
+  --trust-remote-code \
   ${EXTRA:-}
 PIDS=($!) NAMES=("$INSTANCE") LOGS=("$ENGINE_LOG")
 

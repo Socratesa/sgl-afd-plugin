@@ -38,5 +38,3 @@ bash scripts/nsys_wrap.sh shutdown          # 结束会话（服务随之退出�
 # nsys 下 F 的专家 CUDA graph 会和 CUPTI 抓取冲突（F 的 GPU 卡在 graph 里不返回，A 60s 后 ChannelPoisoned 退出），
 # 所以 wrapper 给 F（--asap-role ffn）追加 --asap-ffn-cuda-graph-max-tokens 0（专家 eager 跑，F 的 kernel 比正常运行慢）。NSYS_FFN_GRAPH_TOKENS=<n> 可改回 graph（会卡）。
 # wrapper 还会给服务设 NVTX 环境变量并追加 --enable-layerwise-nvtx-marker（NSYS_NVTX_FLAGS= 可去掉），这些在每次 forward 都会跑，不管有没有在抓。
-
-WORKER_URLS="10.99.91.63 10.99.91.59" 
