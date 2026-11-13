@@ -2,11 +2,13 @@
 
 A hook body lives in the module of this package at the path of the SGLang module it
 hooks: ``sglang.srt.X.f`` is hooked by ``sgl_asap_plugin.srt.X.f``. Every process
-gets the base hooks, which add the ``--asap-*`` flags and detect the FP4 experts of
-ERNIE 5.5. The launcher registers the role's hooks once it has parsed them, before
-ServerArgs resolution; the processes it starts register them from the exported
-``ASAP_*`` environment. SGLang's plugin loader only logs a hook that fails to apply,
-so the launcher checks that every hook of the role was applied.
+gets the base hooks, which add the ``--asap-*`` flags, detect the FP4 experts of
+ERNIE 5.5, and run those experts' SiTU on ``flashinfer_mxfp4`` (a colocated EP rank
+runs them too; any other activation falls through). The launcher registers the
+role's hooks once it has parsed them, before ServerArgs resolution; the processes
+it starts register them from the exported ``ASAP_*`` environment. SGLang's plugin
+loader only logs a hook that fails to apply, so the launcher checks that every
+hook of the role was applied.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ def _register(target: str, hook, hook_type: HookType) -> None:
 def register_base_hooks() -> None:
     from sgl_asap_plugin.srt import server_args
     from sgl_asap_plugin.srt.configs import model_config
+    from sgl_asap_plugin.srt.layers.quantization import mxfp4_flashinfer_trtllm_moe
 
     _register(
         "sglang.srt.server_args.ServerArgs.add_cli_args",
@@ -52,6 +55,15 @@ def register_base_hooks() -> None:
         "sglang.srt.configs.model_config.ModelConfig.__init__",
         model_config.init,
         HookType.AFTER,
+    )
+    # SiTU on those experts. SGLang's method hardwires SwiGLU; the hook falls
+    # through for every other activation, so DeepSeek-V4 is unchanged. A colocated
+    # EP rank runs the experts itself, so this is not an FFN-role hook.
+    _register(
+        "sglang.srt.layers.quantization.mxfp4_flashinfer_trtllm_moe."
+        "Mxfp4FlashinferTrtllmMoEMethod.apply",
+        mxfp4_flashinfer_trtllm_moe.apply,
+        HookType.AROUND,
     )
 
 
@@ -151,16 +163,8 @@ def register_role_hooks(args: Asap) -> None:
         weight_utils.skip_routed_experts()
     else:
         from sgl_asap_plugin.srt.entrypoints import http_server
-        from sgl_asap_plugin.srt.layers.quantization import mxfp4_flashinfer_trtllm_moe
         from sgl_asap_plugin.srt.managers import scheduler
 
-        # ERNIE 5.5's SiTU on flashinfer_mxfp4; inert for any other activation.
-        _register(
-            "sglang.srt.layers.quantization.mxfp4_flashinfer_trtllm_moe."
-            "Mxfp4FlashinferTrtllmMoEMethod.apply",
-            mxfp4_flashinfer_trtllm_moe.apply,
-            HookType.AROUND,
-        )
         _register(
             "sglang.srt.entrypoints.http_server.launch_server",
             http_server.launch_server,

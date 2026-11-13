@@ -61,13 +61,14 @@ bash scripts/launch_asap.sh                   # 2A4F：A 在 GPU 0、1，F 在 G
 
 ## Hook 表
 
-`register()` 在每个进程里注册 base 三个；启动进程解析到 `--asap-role` 后、ServerArgs 解析之前注册该角色的其余 hook，子进程按继承的 `ASAP_ROLE` 注册。hook 体都在插件里与目标同路径的模块中（参数的解析与检查在 `srt/arg_groups/asap_hook.py`，同 SGLang 自己的写法），`tests/test_cpu.py` 检查这一点和每个目标的签名。SGLang 的加载器对挂不上的 hook 只记日志，所以启动进程会检查每个 hook 都已生效。
+`register()` 在每个进程里注册 base 四个；启动进程解析到 `--asap-role` 后、ServerArgs 解析之前注册该角色的其余 hook，子进程按继承的 `ASAP_ROLE` 注册。hook 体都在插件里与目标同路径的模块中（参数的解析与检查在 `srt/arg_groups/asap_hook.py`，同 SGLang 自己的写法），`tests/test_cpu.py` 检查这一点和每个目标的签名。SGLang 的加载器对挂不上的 hook 只记日志，所以启动进程会检查每个 hook 都已生效。
 
 | 目标 | 类型 | 角色 | 作用 |
 |---|---|---|---|
 | `sglang.srt.server_args.ServerArgs.add_cli_args` | AFTER | 所有进程 | 增加 `--asap-*` 选项 |
 | `sglang.srt.server_args.ServerArgs.from_cli_args` | BEFORE | 所有进程 | 见到 `--asap-role` 时注册该角色的 hook 并导出 `ASAP_*` |
 | `sglang.srt.configs.model_config.ModelConfig.__init__` | AFTER | 所有进程 | ERNIE 5.5 的 FP4 checkpoint 在 fp8 `quantization_config` 里写 `"expert_dtype": "mxfp4"`，SGLang 不认：置 `is_fp4_experts`，专家按 MXFP4 加载。FP8 checkpoint 没有这一项，专家照常按 FP8 加载。不带 `--asap-role` 的同机部署（EP 基线）也要它 |
+| `sglang.srt.layers.quantization.mxfp4_flashinfer_trtllm_moe.Mxfp4FlashinferTrtllmMoEMethod.apply` | AROUND | 所有进程 | SGLang 的这个 MXFP4 方法（fp8 配置加 MXFP4 专家，DSV4 与 ERNIE FP4 checkpoint 的格式）把激活写死成 SwiGLU，不读 `moe_runner_config.activation`，ERNIE 的 SiTU 专家会静默算错。激活为 `situ` 时改调 FlashInfer 的 SiTU kernel（`gemm1_alpha` = SiTU 的 beta，`gemm1_beta` = linear_beta，标准 top-k、MXFP8 激活）；其他激活原样走原函数，DSV4 不受影响。权重排布不用改。同机部署的 EP rank 自己跑这些专家，所以它跟上面那个检测一样是 base hook |
 | `handle_cuda_graph_config`（`register_resolution_hook`） | 解析步骤 | attn, ffn | `handle_asap`：声明 `disable_shared_experts_fusion=True`；AFD 的 A 再声明 `disable_cuda_graph=True` |
 | `sglang.srt.arg_groups.validation_hook.check_server_args` | BEFORE | attn, ffn | `check_asap_server_args`：部署规则，早于 SGLang 自带检查；补齐由解析结果得出的值并导出 |
 | `sglang.srt.utils.network.get_free_port_below_ephemeral` | REPLACE | attn, ffn | 本机临时端口从 10000 起，SGLang 给每个 DP 副本选进程组端口的范围（22000–29999）落在其中，只好退回 bind(0)，副本启动时常撞 `EADDRINUSE`；改为固定端口：副本 r 用 9500 + r（SGLang 先占住上一个副本的端口再要下一个，所以从 9500 起取第一个空闲的就是下一个副本的） |
@@ -83,7 +84,6 @@ bash scripts/launch_asap.sh                   # 2A4F：A 在 GPU 0、1，F 在 G
 | `sglang.srt.models.ernie55.Ernie5_5Model.forward` | AROUND | attn（AFD） | 被拆成两个 micro-batch 的 prefill 批把各层当作重叠的操作来跑（对应 `DeepseekV4Model._forward_layers_tbo`），embedding 与层后的 hc_head、norm 同 SGLang；其他批走原函数。判断条件同 `DeepseekV4Model._can_run_tbo` 那一行（另加：开了 DSpark 捕获时不重叠）|
 | `sglang.srt.entrypoints.http_server.launch_server` | REPLACE | ffn | 只拉 scheduler rank 和 `/health` |
 | `sglang.srt.managers.scheduler.Scheduler` | REPLACE（类） | ffn | 换成 `FfnScheduler` |
-| `sglang.srt.layers.quantization.mxfp4_flashinfer_trtllm_moe.Mxfp4FlashinferTrtllmMoEMethod.apply` | AROUND | ffn | SGLang 的这个 MXFP4 方法（fp8 配置加 MXFP4 专家，DSV4 与 ERNIE FP4 checkpoint 的格式）把激活写死成 SwiGLU，不读 `moe_runner_config.activation`，ERNIE 的 SiTU 专家会静默算错。激活为 `situ` 时改调 FlashInfer 的 SiTU kernel（`gemm1_alpha` = SiTU 的 beta，`gemm1_beta` = linear_beta，标准 top-k、MXFP8 激活）；其他激活原样走原函数，DSV4 不受影响。权重排布不用改 |
 | `sglang.srt.model_loader.weight_utils.buffered_multi_thread_safetensors_weights_iterator` | AROUND | attn（AFD）, ffn | 本角色不加载的张量不读：A 不读路由专家（166.9 GB 里的约 147 GB），F rank f 只读自己的路由专家 |
 | `sglang.srt.model_loader.weight_utils.safetensors_weights_iterator` | AROUND | attn（AFD）, ffn | 同上，单线程路径 |
 

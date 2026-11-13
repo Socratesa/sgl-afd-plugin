@@ -1,5 +1,6 @@
 #!/bin/bash
-# Colocated baseline of run_asap.sh: stock SGLang (plugin off), EP ranks that each run attention (attn-tp 1, attention
+# Colocated baseline of run_asap.sh: stock SGLang plus the plugin's base hooks (ERNIE 5.5's MXFP4
+# experts and their SiTU), EP ranks that each run attention (attn-tp 1, attention
 # DP = EP) and a share of the experts. W4A16 experts (MXFP4 weights, humming, bf16 activations from DeepEP's bf16 dispatch)
 # and fp8 KV cache, like run_asap.sh; the metrics flags are the same too, so the two deployments are compared on equal
 # terms. No two-batch overlap, and no CUDA graphs on the attention side (neither has them in run_asap.sh).
@@ -39,7 +40,10 @@ ROUTER=${ROUTER:-1}
 
 VENV=${VENV:-/path/to/venv}
 MODEL=${MODEL:-/path/to/model}
-PLUGINS=none
+# The plugin's base hooks only: ERNIE 5.5's MXFP4 experts (expert_dtype) and their
+# SiTU on flashinfer_mxfp4. No --asap-role, so the role hooks stay unregistered;
+# any other activation (DeepSeek-V4) falls through to SGLang's own method.
+PLUGINS=sgl_asap_plugin
 DEPLOY=ep$EP
 # Prometheus model_name: asap_dsv4_<topology>, e.g. asap_dsv4_ep4 / asap_dsv4_ep8 / asap_dsv4_ep4x2. METRIC_MODEL overrides it.
 METRIC_MODEL=${METRIC_MODEL:-asap_dsv4_${DEPLOY}}
