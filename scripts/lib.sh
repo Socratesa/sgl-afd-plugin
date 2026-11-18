@@ -84,17 +84,17 @@ wait_ready() {
   done
 }
 
-# start_router EXPECT_RANKS URL...: smg.sh over the engines' URLs (it replaces whatever listens on :20010 and returns once
-# the router knows EXPECT_RANKS DP ranks). Needs LOG_DIR. HOST is the engines' bind address in the callers, not the router's
-# (ROUTER_HOST, default all interfaces).
+# start_router EXPECT_RANKS URL...: sgl-router.sh (python smg, policy manual) over the engines' URLs. It replaces whatever
+# listens on :20010 and returns once the router knows EXPECT_RANKS DP ranks. Needs LOG_DIR. HOST is the engines' bind
+# address in the callers, not the router's (ROUTER_HOST, default all interfaces).
 start_router() {
   local expect=$1
   shift
-  if HOST=${ROUTER_HOST:-0.0.0.0} EXPECT_RANKS=$expect WORKER_URLS="$*" LOG_DIR="$LOG_DIR" bash "$SCRIPT_DIR/smg.sh"; then
+  if HOST=${ROUTER_HOST:-0.0.0.0} VENV="${VENV:-}" EXPECT_RANKS=$expect WORKER_URLS="$*" LOG_DIR="$LOG_DIR" bash "$SCRIPT_DIR/sgl-router.sh"; then
     ROUTER_STARTED=1
     echo "router: :${ROUTER_PORT:-20010} -> $* (log $LOG_DIR/pd_router.log)"
   else
-    echo "router: smg.sh failed, see $LOG_DIR/pd_router.log; start it with: WORKER_URLS=\"$*\" LOG_DIR=$LOG_DIR bash $SCRIPT_DIR/smg.sh" >&2
+    echo "router: sgl-router.sh failed, see $LOG_DIR/pd_router.log; start it with: WORKER_URLS=\"$*\" LOG_DIR=$LOG_DIR bash $SCRIPT_DIR/sgl-router.sh" >&2
     return 1
   fi
 }
